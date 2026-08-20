@@ -21,16 +21,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.launch
 import com.earthvideo.app.data.model.Movie
-import kotlinx.coroutines.launch
 import com.earthvideo.app.data.repository.MovieRepository
-import kotlinx.coroutines.launch
 import com.earthvideo.app.ui.components.MovieCard
-import kotlinx.coroutines.launch
 import com.earthvideo.app.ui.components.SkeletonGrid
-import kotlinx.coroutines.launch
 import com.earthvideo.app.ui.theme.*
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterialApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -41,52 +37,18 @@ fun FavoritesScreen(
 ) {
     var movies by remember { mutableStateOf(listOf<Movie>()) }
     var isLoading by remember { mutableStateOf(true) }
-    var isRefreshing by remember { mutableStateOf(false) }
-    var isLoadingMore by remember { mutableStateOf(false) }
-    var currentPage by remember { mutableIntStateOf(1) }
-    var hasMore by remember { mutableStateOf(false) }
-    val gridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
 
-    suspend fun loadFavs(page: Int, refresh: Boolean = false) {
-        if (!refresh && page == 1) isLoading = true
-        try {
-            val data = repository.getFavorites(page)
-            if (page == 1 || refresh) {
-                movies = data.list
-            } else {
-                movies = movies + data.list
-            }
-            hasMore = data.hasMore
-        } catch (_: Exception) {}
-        isLoading = false
-        isRefreshing = false
-        isLoadingMore = false
-    }
-
     LaunchedEffect(Unit) {
-        loadFavs(1)
-    }
-
-    // Load-more
-    val totalItemsCount = gridState.layoutInfo.totalItemsCount
-    val lastVisibleItemIndex = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-    LaunchedEffect(totalItemsCount, lastVisibleItemIndex) {
-        if (!isLoading && !isLoadingMore && hasMore && totalItemsCount > 0 && lastVisibleItemIndex >= totalItemsCount - 2) {
-            isLoadingMore = true
-            val nextPage = currentPage + 1
-            currentPage = nextPage
-            loadFavs(nextPage)
-        }
+        movies = repository.getLocalFavorites()
+        isLoading = false
     }
 
     val pullRefreshState = rememberPullRefreshState(
-        refreshing = isRefreshing,
+        refreshing = false,
         onRefresh = {
             scope.launch {
-                isRefreshing = true
-                currentPage = 1
-                loadFavs(1, refresh = true)
+                movies = repository.getLocalFavorites()
             }
         }
     )
@@ -116,7 +78,6 @@ fun FavoritesScreen(
                         .pullRefresh(pullRefreshState)
                 ) {
                     LazyVerticalGrid(
-                        state = gridState,
                         columns = GridCells.Fixed(2),
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
@@ -129,26 +90,9 @@ fun FavoritesScreen(
                                 onClick = { onMovieClick(movie.id) }
                             )
                         }
-                        if (isLoadingMore) {
-                            item(span = { GridItemSpan(2) }) {
-                                Box(
-                                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.Center
-                                    ) {
-                                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = Primary)
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text("加载中...", fontSize = 13.sp, color = TextHint)
-                                    }
-                                }
-                            }
-                        }
                     }
                     PullRefreshIndicator(
-                        refreshing = isRefreshing,
+                        refreshing = false,
                         state = pullRefreshState,
                         modifier = Modifier.align(Alignment.TopCenter),
                         contentColor = Primary

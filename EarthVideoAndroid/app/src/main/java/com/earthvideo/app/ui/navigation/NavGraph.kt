@@ -1,6 +1,8 @@
 package com.earthvideo.app.ui.navigation
+import androidx.compose.runtime.remember
 
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -39,7 +41,8 @@ object Routes {
 
 @Composable
 fun AppNavGraph(navController: NavHostController, modifier: Modifier = Modifier) {
-    val repository = MovieRepository()
+    val context = LocalContext.current
+    val repository = remember { MovieRepository(context) }
 
     NavHost(navController = navController, startDestination = Routes.HOME, modifier = modifier) {
         composable(Routes.HOME) {

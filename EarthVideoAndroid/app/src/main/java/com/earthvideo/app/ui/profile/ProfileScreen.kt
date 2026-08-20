@@ -26,7 +26,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import com.earthvideo.app.data.model.UserProfile
 import com.earthvideo.app.data.repository.MovieRepository
 import com.earthvideo.app.ui.theme.*
 
@@ -46,7 +45,9 @@ fun ProfileScreen(
     onNavigateToSettings: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    var userProfile by remember { mutableStateOf(UserProfile()) }
+    var historyCount by remember { mutableIntStateOf(repository.getLocalHistoryCount()) }
+    var favoriteCount by remember { mutableIntStateOf(repository.getLocalFavoriteCount()) }
+    var downloadCount by remember { mutableIntStateOf(0) }
 
     val toast = remember { mutableStateOf<String?>(null) }
     LaunchedEffect(toast.value) {
@@ -54,12 +55,6 @@ fun ProfileScreen(
             Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
             toast.value = null
         }
-    }
-
-    LaunchedEffect(Unit) {
-        try {
-            userProfile = repository.getUserProfile()
-        } catch (_: Exception) {}
     }
 
     val menuItems = listOf(
@@ -164,19 +159,19 @@ fun ProfileScreen(
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
                     StatItem(
-                        count = "${userProfile.historyCount}",
+                        count = "$historyCount",
                         label = "观看历史",
                         onClick = onNavigateToHistory
                     )
                     VerticalDivider()
                     StatItem(
-                        count = "${userProfile.favoriteCount}",
+                        count = "$favoriteCount",
                         label = "我的收藏",
                         onClick = onNavigateToFavorites
                     )
                     VerticalDivider()
                     StatItem(
-                        count = "${userProfile.downloadCount}",
+                        count = "$downloadCount",
                         label = "我的下载",
                         onClick = onNavigateToDownloads
                     )

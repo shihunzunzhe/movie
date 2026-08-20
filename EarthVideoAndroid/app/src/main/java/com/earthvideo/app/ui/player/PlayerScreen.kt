@@ -237,8 +237,8 @@ fun PlayerScreen(
             val urlResp = repository.getPlayUrl(movieId, currentEpisode)
             playUrl = urlResp.url
             currentSources = urlResp.sources
-            isFavorite = repository.getFavoritesStatus(movieId)
-            repository.addHistory(movieId)
+            isFavorite = repository.isLocalFavorite(movieId)
+            movie?.let { repository.addLocalHistory(it) }
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -482,8 +482,9 @@ fun PlayerScreen(
                                     tint = if (isFavorite) HotRed else TextSecondary,
                                     onClick = {
                                         scope.launch {
-                                            val fav = repository.toggleFavorite(movieId)
-                                            isFavorite = fav
+                                        movie?.let { m ->
+                                            isFavorite = repository.toggleLocalFavorite(m)
+                                        }
                                         }
                                     }
                                 )

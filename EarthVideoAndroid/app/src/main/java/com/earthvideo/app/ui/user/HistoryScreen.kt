@@ -5,7 +5,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.icons.Icons
@@ -41,54 +40,19 @@ fun HistoryScreen(
 ) {
     var movies by remember { mutableStateOf(listOf<Movie>()) }
     var isLoading by remember { mutableStateOf(true) }
-    var isRefreshing by remember { mutableStateOf(false) }
-    var isLoadingMore by remember { mutableStateOf(false) }
-    var currentPage by remember { mutableIntStateOf(1) }
-    var hasMore by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
-    val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    suspend fun loadHistory(page: Int, refresh: Boolean = false) {
-        if (!refresh && page == 1) isLoading = true
-        try {
-            val data = repository.getHistory(page)
-            if (page == 1 || refresh) {
-                movies = data.list
-            } else {
-                movies = movies + data.list
-            }
-            hasMore = data.hasMore
-        } catch (_: Exception) {}
-        isLoading = false
-        isRefreshing = false
-        isLoadingMore = false
-    }
-
     LaunchedEffect(Unit) {
-        loadHistory(1)
-    }
-
-    // Load-more detection
-    val layoutInfo = listState.layoutInfo
-    val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-    val totalItems = layoutInfo.totalItemsCount
-    LaunchedEffect(lastVisible, totalItems) {
-        if (!isLoading && !isLoadingMore && hasMore && totalItems > 0 && lastVisible >= totalItems - 2) {
-            isLoadingMore = true
-            val nextPage = currentPage + 1
-            currentPage = nextPage
-            loadHistory(nextPage)
-        }
+        movies = repository.getLocalHistory()
+        isLoading = false
     }
 
     val pullRefreshState = rememberPullRefreshState(
-        refreshing = isRefreshing,
+        refreshing = false,
         onRefresh = {
             scope.launch {
-                isRefreshing = true
-                currentPage = 1
-                loadHistory(1, refresh = true)
+                movies = repository.getLocalHistory()
             }
         }
     )
@@ -125,32 +89,14 @@ fun HistoryScreen(
                         .pullRefresh(pullRefreshState)
                 ) {
                     LazyColumn(
-                        state = listState,
                         modifier = Modifier.fillMaxSize()
                     ) {
                         items(movies, key = { it.id }) { movie ->
                             HistoryListItem(movie = movie, onClick = { onMovieClick(movie.id) })
                         }
-                        if (isLoadingMore) {
-                            item {
-                                Box(
-                                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.Center
-                                    ) {
-                                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = Primary)
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text("加载更多...", fontSize = 13.sp, color = TextHint)
-                                    }
-                                }
-                            }
-                        }
                     }
                     PullRefreshIndicator(
-                        refreshing = isRefreshing,
+                        refreshing = false,
                         state = pullRefreshState,
                         modifier = Modifier.align(Alignment.TopCenter),
                         contentColor = Primary
@@ -168,10 +114,8 @@ fun HistoryScreen(
             confirmButton = {
                 TextButton(onClick = {
                     showClearDialog = false
-                    scope.launch {
-                        try { repository.clearHistory() } catch (_: Exception) {}
-                        movies = emptyList()
-                    }
+                    repository.clearLocalHistory()
+                    movies = emptyList()
                 }) {
                     Text("清空", color = HotRed, fontWeight = FontWeight.Bold)
                 }

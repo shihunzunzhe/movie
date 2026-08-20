@@ -1,10 +1,12 @@
 package com.earthvideo.app.data.repository
 
+import android.content.Context
 import com.earthvideo.app.data.api.RetrofitClient
 import com.earthvideo.app.data.model.*
 
-class MovieRepository {
+class MovieRepository(context: Context) {
     private val api = RetrofitClient.apiService
+    private val local = LocalStorage(context)
 
     suspend fun getHomeRecommend(category: String = "recommend", page: Int = 1, size: Int = 20): PageData<Movie> {
         return api.getHomeRecommend(category, page, size).data
@@ -57,37 +59,23 @@ class MovieRepository {
         return api.getUserProfile().data
     }
 
-    // History
-    suspend fun getHistory(page: Int = 1): PageData<Movie> {
-        return api.getHistory(page).data
-    }
+    // History (local storage — persists across restarts)
+    fun getLocalHistory(): List<Movie> = local.getHistoryMovies()
 
-    suspend fun addHistory(movieId: String) {
-        api.addHistory(mapOf("movie_id" to movieId))
-    }
+    fun addLocalHistory(movie: Movie) = local.addHistoryMovie(movie)
 
-    suspend fun clearHistory() {
-        api.clearHistory()
-    }
+    fun clearLocalHistory() = local.clearHistory()
 
-    // Favorites
-    suspend fun getFavorites(page: Int = 1): PageData<Movie> {
-        return api.getFavorites(page, 20).data
-    }
+    fun getLocalHistoryCount(): Int = local.getHistoryCount()
 
-    suspend fun toggleFavorite(movieId: String): Boolean {
-        val result = api.toggleFavorite(mapOf("movie_id" to movieId)).data
-        return result["isFavorite"] as? Boolean ?: false
-    }
+    // Favorites (local storage — persists across restarts)
+    fun getLocalFavorites(): List<Movie> = local.getFavoriteMovies()
 
-    suspend fun getFavoritesStatus(movieId: String): Boolean {
-        return try {
-            val result = api.getFavoritesStatus(movieId).data
-            result["isFavorite"] as? Boolean ?: false
-        } catch (e: Exception) {
-            false
-        }
-    }
+    fun toggleLocalFavorite(movie: Movie): Boolean = local.toggleFavorite(movie)
+
+    fun isLocalFavorite(movieId: String): Boolean = local.isFavorite(movieId)
+
+    fun getLocalFavoriteCount(): Int = local.getFavoriteCount()
 
     // Health
     suspend fun healthCheck(): Boolean {
