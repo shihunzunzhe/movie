@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#3B6EE5</color>
+    <color name="primary_dark">#2A5ACF</color>
+    <color name="hot_red">#F44336</color>
+    <color name="gold">#FFC107</color>
+    <color name="orange">#FF9800</color>
+    <color name="page_bg">#FFFFFF</color>
+    <color name="text_primary">#212121</color>
+    <color name="text_secondary">#666666</color>
+    <color name="text_hint">#999999</color>
+    <color name="divider">#EEEEEE</color>
+    <color name="tab_bg">#F5F5F5</color>
+    <color name="player_bg">#000000</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

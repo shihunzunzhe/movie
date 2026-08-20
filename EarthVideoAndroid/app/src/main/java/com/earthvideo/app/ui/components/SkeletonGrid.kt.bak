@@ -1,0 +1,168 @@
+package com.earthvideo.app.ui.components
+
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.earthvideo.app.ui.theme.*
+
+/**
+ * Animated shimmer placeholder for movie grids. Renders a 2 or 3 column grid of poster skeletons.
+ */
+@Composable
+fun SkeletonGrid(
+    columns: Int = 2,
+    rows: Int = 4,
+    modifier: Modifier = Modifier
+) {
+    val transition = rememberInfiniteTransition(label = "shimmer")
+    val alpha by transition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "shimmerAlpha"
+    )
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        repeat(rows) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(Dimens.gridGap)
+            ) {
+                repeat(columns) {
+                    SkeletonCard(alpha = alpha, modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SkeletonCard(alpha: Float, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(Dimens.cardRadius))
+            .background(CardBg)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.72f)
+                .clip(RoundedCornerShape(Dimens.cardPosterRadius))
+                .background(TabBg.copy(alpha = alpha))
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Box(
+            modifier = Modifier
+                .padding(horizontal = 8.dp)
+                .fillMaxWidth(0.7f)
+                .height(12.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(TabBg.copy(alpha = alpha))
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Box(
+            modifier = Modifier
+                .padding(horizontal = 8.dp)
+                .fillMaxWidth(0.5f)
+                .height(10.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(TabBg.copy(alpha = alpha))
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+    }
+}
+
+/**
+ * List-style skeleton (used for search results, history, rank list).
+ */
+@Composable
+fun SkeletonList(items: Int = 6, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "shimmer")
+    val alpha by transition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "shimmerAlpha"
+    )
+
+    Column(modifier = modifier.fillMaxSize()) {
+        repeat(items) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(CardBg)
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(100.dp)
+                        .height(135.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(TabBg.copy(alpha = alpha))
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.7f)
+                            .height(14.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(TabBg.copy(alpha = alpha))
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.9f)
+                            .height(12.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(TabBg.copy(alpha = alpha))
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(0.5f)
+                            .height(12.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(TabBg.copy(alpha = alpha))
+                    )
+                }
+            }
+            DividerLine()
+        }
+    }
+}
+
+@Composable
+private fun DividerLine() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(0.5.dp)
+            .background(Divider)
+    )
+}

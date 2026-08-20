@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="divider">#EEEEEE</color>
+    <color name="gold">#FFC107</color>
+    <color name="hot_red">#F44336</color>
+    <color name="orange">#FF9800</color>
+    <color name="page_bg">#FFFFFF</color>
+    <color name="player_bg">#000000</color>
+    <color name="primary">#3B6EE5</color>
+    <color name="primary_dark">#2A5ACF</color>
+    <color name="tab_bg">#F5F5F5</color>
+    <color name="text_hint">#999999</color>
+    <color name="text_primary">#212121</color>
+    <color name="text_secondary">#666666</color>
+    <color name="white">#FFFFFFFF</color>
+    <string name="all">全部</string>
+    <string name="app_name">大地视频</string>
+    <string name="cancel">取消</string>
+    <string name="category">分类</string>
+    <string name="comment">评论</string>
+    <string name="discover">找片</string>
+    <string name="download">下载</string>
+    <string name="downloads">我的下载</string>
+    <string name="episode">选集</string>
+    <string name="favorite">收藏</string>
+    <string name="favorites">我的收藏</string>
+    <string name="feedback">意见反馈</string>
+    <string name="history">观看历史</string>
+    <string name="home">首页</string>
+    <string name="home_search_hint">搜索影片</string>
+    <string name="hot_search">热门搜索</string>
+    <string name="login_register">登陆/注册</string>
+    <string name="login_subtitle">开启大地视频之旅</string>
+    <string name="play_now">立即播放</string>
+    <string name="play_source">播放源</string>
+    <string name="profile">我的</string>
+    <string name="rank">排行</string>
+    <string name="rank_title">排行榜</string>
+    <string name="report">帮助</string>
+    <string name="search_hint">片名 / 演员 / 导演</string>
+    <string name="search_history">搜索历史</string>
+    <string name="settings">设置</string>
+    <string name="share">分享</string>
+    <string name="special">专题</string>
+    <string name="upload">上传视频</string>
+    <style name="Theme.EarthVideo" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#3B6EE5</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
+    </style>
+</resources>
