@@ -1,22 +1,26 @@
 """MySQL-backed storage for EarthVideo.
-Auto-creates database and tables if they don't exist."""
+Auto-creates database and tables if they don't exist.
+Configuration loaded from .env file or environment variables."""
 
 import json
-import asyncio
+import os
 import logging
-from typing import List, Optional, Dict
+from typing import List, Optional
+from dotenv import load_dotenv
 from .models import Movie
 
 import aiomysql
 
 logger = logging.getLogger("earthvideo.mysql")
 
+load_dotenv()
+
 DB_CONFIG = {
-    "host": "127.0.0.1",
-    "port": 3306,
-    "user": "root",
-    "password": "",
-    "db": "earthvideo",
+    "host": os.getenv("DB_HOST", "127.0.0.1"),
+    "port": int(os.getenv("DB_PORT", "3306")),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "db": os.getenv("DB_NAME", "earthvideo"),
     "autocommit": True,
 }
 
