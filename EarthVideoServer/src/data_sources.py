@@ -1,6 +1,8 @@
 import asyncio
 import re
 import time
+import json
+import urllib.parse
 from typing import List, Optional, Dict
 from .models import Movie
 
@@ -24,13 +26,31 @@ MAX_PAGES = 1
 
 
 def _merge_movie_fields(existing: Movie, fresh: Movie) -> Movie:
-    for field in ['posterUrl', 'director', 'actors', 'region', 'year',
-                  'introduction', 'episodeTotal', 'episodeUpdated',
-                  'episodeTag', 'playUrls']:
+    """Union existing and fresh: truthy fields from either side win."""
+    for field in [
+        'posterUrl', 'description', 'director', 'actors', 'region',
+        'year', 'introduction', 'episodeTotal', 'episodeUpdated',
+        'episodeTag', 'playUrls', 'type', 'genre', 'tags', 'rating',
+        'hotTag', 'highlightTitle',
+    ]:
         existing_val = getattr(existing, field, None)
-        if existing_val and (isinstance(existing_val, (str, int, float, list, dict)) and existing_val):
+        fresh_val = getattr(fresh, field, None)
+        if existing_val and _is_truthy_field(existing_val):
             setattr(fresh, field, existing_val)
+        elif fresh_val and _is_truthy_field(fresh_val):
+            setattr(existing, field, fresh_val)
     return fresh
+
+
+def _is_truthy_field(v) -> bool:
+    """Treat 0 and empty containers as missing for merge purposes."""
+    if v is None:
+        return False
+    if isinstance(v, (list, dict, str)) and len(v) == 0:
+        return False
+    if isinstance(v, int) and v == 0:
+        return False
+    return True
 
 
 class YutuHtmlSource:
@@ -361,12 +381,551 @@ class YutuHtmlSource:
         return self._movies.get(movie_id)
 
 
+class MoguHtmlSource:
+    """Data source for 5o5k.com (蘑菇影视) - maccms-based movie portal.
+
+    URL conventions:
+      - List page:    /vodshow/{type_id}--------{page}---.html
+      - Detail page:  /voddetail/{id}.html  (carries JSON-LD metadata + source/episode list)
+      - Play page:    /vodplay/{id}-{sid}-{nid}.html  (carries URL-encoded m3u8 link)
+    """
+
+    SOURCE_PREFIX = "mogu_"
+    SOURCE_NAME = "\u8611\u83c7\u5f71\u89c6"
+
+    CATEGORY_IDS = [20, 35, 43, 48, 55]
+    CATEGORY_MAP = {
+        20: "\u7535\u5f71",
+        35: "\u7535\u89c6\u5267",
+        43: "\u7efc\u827a",
+        48: "\u52a8\u6f2b",
+        55: "\u77ed\u5267",
+    }
+
+    MAX_PAGES = 2
+    EPISODES_TO_PRELOAD = 3
+
+    def __init__(self, base_url: str = "https://www.5o5k.com"):
+        self.base_url = base_url.rstrip("/")
+        self.name = self.SOURCE_NAME
+        self._movies: Dict[str, Movie] = {}
+        self._last_fetch: float = 0
+        self._fetch_interval: float = 300
+        self._movie_sources: Dict[str, List[Tuple[int, str, int]]] = {}
+        self._headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/151.0.0.0 Safari/537.36"
+            ),
+            "accept": (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,image/apng,*/*;q=0.8"
+            ),
+            "accept-language": "zh-CN,zh;q=0.9",
+            "referer": self.base_url + "/",
+        }
+
+    @staticmethod
+    def source_prefix() -> str:
+        return MoguHtmlSource.SOURCE_PREFIX
+
+    def make_movie_id(self, vid: str) -> str:
+        return f"{self.SOURCE_PREFIX}{vid}"
+
+    def _parse_vid(self, movie_id: str) -> Optional[str]:
+        if not movie_id.startswith(self.SOURCE_PREFIX):
+            return None
+        return movie_id[len(self.SOURCE_PREFIX):]
+
+    async def fetch_movies(self, force: bool = False) -> List[Movie]:
+        now = time.time()
+        if not force and self._movies and (now - self._last_fetch) < self._fetch_interval:
+            return list(self._movies.values())
+
+        all_movies: Dict[str, Movie] = {}
+        async with httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(max_keepalive_connections=2),
+        ) as client:
+            for cid in self.CATEGORY_IDS:
+                for page in range(1, self.MAX_PAGES + 1):
+                    retries = 2
+                    success = False
+                    for attempt in range(retries):
+                        try:
+                            url = f"{self.base_url}/vodshow/{cid}--------{page}---.html"
+                            resp = await client.get(url, headers=self._headers)
+                            resp.raise_for_status()
+                            items = self._parse_category_page(resp.text, cid)
+                            if not items:
+                                success = True
+                                break
+                            for m in items:
+                                existing = self._movies.get(m.id)
+                                if existing:
+                                    _merge_movie_fields(existing, m)
+                                all_movies[m.id] = m
+                            cat_name = self.CATEGORY_MAP.get(cid, "?")
+                            logger.info(
+                                "[mogu] Category %s (%s) page %s: %s items",
+                                cid, cat_name, page, len(items),
+                            )
+                            success = True
+                            break
+                        except Exception as e:
+                            logger.warning(
+                                "[mogu] Category %s page %s attempt %s failed: %s",
+                                cid, page, attempt + 1, e,
+                            )
+                            if attempt < retries - 1:
+                                await asyncio.sleep(2)
+                    if not success:
+                        break
+
+        if all_movies:
+            self._movies = all_movies
+            self._last_fetch = now
+            logger.info("[mogu] Total movies fetched: %s", len(all_movies))
+        return list(self._movies.values())
+
+    def _parse_category_page(self, html: str, cid: int) -> List[Movie]:
+        """Parse a vodshow list page and return Movie objects with basic info."""
+        pattern = (
+            r'<a[^>]*href="/voddetail/(\d+)\.html"'
+            r'[^>]*title="([^"]*)"'
+            r'[^>]*class="module-poster-item module-item"'
+            r'[^>]*>(.*?)</a>'
+        )
+        blocks = re.findall(pattern, html, re.DOTALL)
+        if not blocks:
+            return []
+
+        category_name = self.CATEGORY_MAP.get(cid, f"\u5206\u7c7b{cid}")
+        result: List[Movie] = []
+        for vid, raw_title, block in blocks:
+            try:
+                title = html.unescape(raw_title).strip()
+            except AttributeError:
+                from html import unescape as _unescape
+                title = _unescape(raw_title).strip()
+            if not title:
+                continue
+            poster_match = re.search(r'data-original="([^"]*)"', block)
+            poster = poster_match.group(1).strip() if poster_match else ""
+            note_match = re.search(r'<div class="module-item-note">([^<]*)</div>', block)
+            note = note_match.group(1).strip() if note_match else ""
+
+            mid = self.make_movie_id(vid)
+            result.append(Movie(
+                id=mid,
+                title=title,
+                description="",
+                posterUrl=poster,
+                type=category_name,
+                region="",
+                year=2026,
+                genre=[],
+                director="",
+                actors=[],
+                episodeTotal=0,
+                episodeUpdated=0,
+                episodeTag=note,
+                hotTag=False,
+                rating=0.0,
+                tags=note,
+                source=self.SOURCE_NAME,
+                sourceAvatar="",
+                introduction="",
+            ))
+        return result
+
+    async def fetch_detail(self, movie_id: str) -> Optional[Movie]:
+        vid = self._parse_vid(movie_id)
+        if not vid:
+            return None
+        url = f"{self.base_url}/voddetail/{vid}.html"
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=30.0,
+                limits=httpx.Limits(max_keepalive_connections=2),
+            ) as client:
+                resp = await client.get(
+                    url,
+                    headers={**self._headers, "referer": f"{self.base_url}/"},
+                )
+                resp.raise_for_status()
+                html = resp.text
+                movie = self._parse_detail_page(html, vid)
+                if not movie:
+                    return None
+
+                # Merge into existing (in cache) so all known fields accumulate.
+                existing = self._movies.get(movie_id)
+                if existing:
+                    _merge_movie_fields(existing, movie)
+                    movie = existing
+                movie.playUrls = movie.playUrls or {}
+
+                # Preload the first few episode URLs into the canonical movie.
+                sources = self._movie_sources.get(movie_id) or []
+                ep_total = movie.episodeTotal or 1
+                if sources and ep_total >= 1:
+                    best_sid = max(sources, key=lambda s: s[2])[0]
+                    for ep in range(1, min(self.EPISODES_TO_PRELOAD, ep_total) + 1):
+                        if ep in movie.playUrls:
+                            continue
+                        url_ep = await self._fetch_play_url(client, vid, best_sid, ep)
+                        if url_ep:
+                            movie.playUrls[ep] = url_ep
+
+                self._movies[movie_id] = movie
+                return movie
+        except Exception as e:
+            logger.warning("[mogu] Detail fetch failed for %s: %s", movie_id, e)
+            return None
+
+    def _parse_detail_page(self, html: str, vid: str) -> Optional[Movie]:
+        """Extract metadata + source/episode list from a detail page."""
+        mid = self.make_movie_id(vid)
+        existing = self._movies.get(mid)
+        title = existing.title if existing else ""
+
+        name = ""
+        poster = ""
+        year_val = 0
+        region = ""
+        genre = ""
+        director = ""
+        actors: List[str] = []
+        introduction = ""
+        episode_total = 0
+        rating = 0.0
+
+        ld_match = re.search(
+            r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL
+        )
+        if ld_match:
+            try:
+                ld_data = json.loads(ld_match.group(1))
+                graph = ld_data.get("@graph", []) if isinstance(ld_data, dict) else []
+                for item in graph:
+                    if item.get("@type") in ("TVSeries", "Movie"):
+                        name = item.get("name") or name
+                        img = item.get("image")
+                        if isinstance(img, str):
+                            poster = img
+                        elif isinstance(img, dict):
+                            poster = img.get("url") or poster
+                        desc = item.get("description") or ""
+                        if desc and not introduction:
+                            introduction = desc.strip()[:600]
+                        actors = [
+                            a.get("name") for a in item.get("actor", [])
+                            if isinstance(a, dict) and a.get("name")
+                        ]
+                        directors = [
+                            d.get("name") for d in item.get("director", [])
+                            if isinstance(d, dict) and d.get("name")
+                        ]
+                        director = " ".join(directors)
+                        yr = item.get("datePublished") or ""
+                        m_year = re.match(r"(\d{4})", str(yr))
+                        if m_year:
+                            year_val = int(m_year.group(1))
+                        origin = item.get("countryOfOrigin") or {}
+                        if isinstance(origin, dict):
+                            region = origin.get("name") or region
+                        elif isinstance(origin, str):
+                            region = origin
+                        genre = item.get("genre") or genre
+                        ne = item.get("numberOfEpisodes") or 0
+                        if ne:
+                            episode_total = int(ne)
+                        agg = item.get("aggregateRating") or {}
+                        if isinstance(agg, dict) and agg.get("ratingValue"):
+                            try:
+                                rating = float(agg.get("ratingValue"))
+                            except (TypeError, ValueError):
+                                pass
+                        break
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        if not introduction:
+            meta_desc = re.search(
+                r'<meta[^>]*name="description"[^>]*content="([^"]*)"', html
+            )
+            if meta_desc:
+                introduction = meta_desc.group(1).strip()[:600]
+
+        if not poster:
+            pm = re.search(
+                r'<div class="module-info-poster".*?<img[^>]*data-original="([^"]+)"',
+                html, re.DOTALL,
+            )
+            if pm:
+                poster = pm.group(1)
+
+        if not name:
+            h1 = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
+            if h1:
+                name = h1.group(1).strip()
+        title = (name or title).strip()
+
+        tab_blocks = re.findall(
+            r'<div[^>]*class="module-tab-item tab-item[^"]*"[^>]*>'
+            r'.*?data-dropdown-value="([^"]+)".*?<small>(\d+)</small>',
+            html, re.DOTALL,
+        )
+        tab_counts = {name: int(c) for name, c in tab_blocks}
+
+        src_pattern = (
+            r'<div[^>]*class="module-tab-item tab-item[^"]*"'
+            r'[^>]*data-dropdown-value="([^"]+)"'
+        )
+        src_names = re.findall(src_pattern, html)
+
+        sources: List[Tuple[int, str, int]] = []
+        for idx, sname in enumerate(src_names, start=1):
+            count = tab_counts.get(sname, 0)
+            sources.append((idx, sname, count))
+
+        ep_pattern = (
+            r'<a[^>]*class="module-play-list-link[^"]*"'
+            r'[^>]*href="/vodplay/(\d+)-(\d+)-(\d+)\.html"'
+            r'[^>]*>\s*<span>([^<]+)</span>'
+        )
+        ep_matches = re.findall(ep_pattern, html)
+
+        max_nid = 0
+        for _, _, nid_str, _ in ep_matches:
+            try:
+                max_nid = max(max_nid, int(nid_str))
+            except ValueError:
+                pass
+        if max_nid > episode_total:
+            episode_total = max_nid
+        if not episode_total and sources:
+            episode_total = max((s[2] for s in sources), default=0)
+
+        if not episode_total:
+            episode_total = 1
+
+        self._movie_sources[mid] = sources
+
+        def _unescape(s: str) -> str:
+            try:
+                return html.unescape(s)
+            except AttributeError:
+                from html import unescape as _u
+                return _u(s)
+
+        title = _unescape(title)
+        introduction = _unescape(introduction)
+        director = _unescape(director)
+        region = _unescape(region)
+        genre = _unescape(genre)
+        actors = [_unescape(a) for a in actors]
+
+        episode_tag = (
+            f"{episode_total}\u96c6"
+            if episode_total > 1
+            else "1\u96c6" if episode_total == 1 else ""
+        )
+
+        return Movie(
+            id=mid,
+            title=title,
+            description="",
+            posterUrl=poster,
+            type=existing.type if existing else "",
+            region=region,
+            year=year_val,
+            genre=[genre] if genre else [],
+            director=director,
+            actors=actors,
+            episodeTotal=episode_total,
+            episodeUpdated=episode_total,
+            episode_tag=episode_tag,
+            hotTag=False,
+            rating=rating,
+            tags="",
+            source=self.SOURCE_NAME,
+            sourceAvatar="",
+            introduction=introduction,
+        )
+
+    async def _fetch_play_url(
+        self,
+        client: httpx.AsyncClient,
+        vid: str,
+        sid: int,
+        nid: int,
+    ) -> Optional[str]:
+        """Fetch a play page and extract the actual m3u8 URL from player_aaaa."""
+        url = f"{self.base_url}/vodplay/{vid}-{sid}-{nid}.html"
+        try:
+            resp = await client.get(
+                url,
+                headers={**self._headers, "referer": f"{self.base_url}/voddetail/{vid}.html"},
+            )
+            resp.raise_for_status()
+            html_text = resp.text
+            # Find player_aaaa= and extract the full JSON object accounting for nested braces.
+            start = html_text.find("player_aaaa=")
+            if start == -1:
+                return None
+            brace_start = html_text.find("{", start)
+            if brace_start == -1:
+                return None
+            depth = 0
+            end = brace_start
+            for i, ch in enumerate(html_text[brace_start:]):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = brace_start + i + 1
+                        break
+            if depth != 0:
+                return None
+            raw_json = html_text[brace_start:end]
+            data = json.loads(raw_json)
+            raw = data.get("url") or ""
+            if not raw:
+                return None
+            encrypt = data.get("encrypt")
+            if encrypt == 1:
+                return urllib.parse.unquote(raw)
+            if encrypt == 2:
+                import base64
+                return urllib.parse.unquote(base64.b64decode(raw).decode("utf-8"))
+            return raw
+        except Exception as e:
+            logger.warning(
+                "[mogu] play fetch failed vid=%s sid=%s nid=%s: %s",
+                vid, sid, nid, e,
+            )
+            return None
+
+    async def batch_fetch_details(self, limit: int = 500, concurrency: int = 6) -> int:
+        movie_ids = list(self._movies.keys())[: min(limit, 9999)]
+        if not movie_ids:
+            return 0
+
+        need_detail = []
+        for mid in movie_ids:
+            m = self._movies.get(mid)
+            if m and m.posterUrl and m.introduction and m.actors:
+                continue
+            need_detail.append(mid)
+
+        if not need_detail:
+            logger.info(
+                "[mogu] All %s movies already have details, skipping",
+                len(movie_ids),
+            )
+            return 0
+
+        logger.info(
+            "[mogu] Fetching details for %s/%s movies",
+            len(need_detail), len(movie_ids),
+        )
+
+        sem = asyncio.Semaphore(concurrency)
+
+        async def fetch_one(mid: str):
+            async with sem:
+                try:
+                    await self.fetch_detail(mid)
+                    return True
+                except Exception:
+                    return False
+
+        tasks = [fetch_one(mid) for mid in need_detail]
+        results = await asyncio.gather(*tasks)
+        success = sum(1 for r in results if r)
+        logger.info("[mogu] Batch detail fetch: %s/%s success", success, len(need_detail))
+        return success
+
+    def _best_source_for_episode(
+        self, movie_id: str, episode: int
+    ) -> Optional[int]:
+        """Pick the source (sid) that has the requested episode."""
+        sources = self._movie_sources.get(movie_id) or []
+        candidates = [s for s in sources if s[2] >= episode]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda s: s[2])[0]
+
+    async def get_play_url_for_episode(
+        self, movie_id: str, episode: int = 1
+    ) -> Optional[str]:
+        m = self._movies.get(movie_id)
+        if m and m.playUrls and episode in m.playUrls:
+            return m.playUrls[episode]
+
+        vid = self._parse_vid(movie_id)
+        if not vid:
+            return None
+
+        sid = self._best_source_for_episode(movie_id, episode)
+        if not sid:
+            return None
+
+        async with httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(max_keepalive_connections=2),
+        ) as client:
+            url = await self._fetch_play_url(client, vid, sid, episode)
+
+        if url and m is not None:
+            m.playUrls = m.playUrls or {}
+            m.playUrls[episode] = url
+        return url
+
+    def get_movie_by_id(self, movie_id: str) -> Optional[Movie]:
+        return self._movies.get(movie_id)
+
+
 class DataSourceManager:
     def __init__(self):
-        self.sources: List[YutuHtmlSource] = []
+        self.sources: List = []
+        self._by_prefix: Dict[str, object] = {}
+        self._by_name: Dict[str, object] = {}
+        self._default_source = None
 
     def add_source(self, name: str, base_url: str, enabled: bool = True):
-        self.sources.append(YutuHtmlSource(base_url))
+        kind = (name or "").lower()
+        if kind in ("mogu", "5o5k"):
+            src = MoguHtmlSource(base_url)
+        else:
+            src = YutuHtmlSource(base_url)
+        self.sources.append(src)
+        prefix = getattr(src, "SOURCE_PREFIX", None)
+        if prefix:
+            self._by_prefix[prefix] = src
+        else:
+            # First non-prefixed source (e.g. Yutu) becomes the default.
+            if self._default_source is None:
+                self._default_source = src
+        sname = getattr(src, "name", None) or getattr(src, "SOURCE_NAME", None)
+        if sname:
+            self._by_name[sname] = src
+
+    def find_source_for_movie(self, movie_id: str):
+        """Return the source that owns this movie_id (based on prefix)."""
+        # Check prefix-matched sources first.
+        for prefix, src in self._by_prefix.items():
+            if movie_id.startswith(prefix):
+                return src
+        # Fallback to the default (non-prefixed) source.
+        if self._default_source:
+            return self._default_source
+        return None
 
     async def refresh_all(self):
         for src in self.sources:

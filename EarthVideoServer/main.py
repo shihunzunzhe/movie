@@ -49,6 +49,7 @@ from src.mysql_store import MySQLStore
 
 data_manager = DataSourceManager()
 data_manager.add_source("yutu", "https://yutuzy10.com", enabled=True)
+data_manager.add_source("mogu", "https://www.5o5k.com", enabled=True)
 mysql = MySQLStore()
 
 # In-memory user store
@@ -77,8 +78,8 @@ async def _load_from_mysql():
         movies, total = await mysql.search_movies(size=100000)
         if movies:
             for m in movies:
-                if data_manager.sources:
-                    src = data_manager.sources[0]
+                src = data_manager.find_source_for_movie(m.id)
+                if src is not None:
                     src._movies[m.id] = m
             logger.info("Loaded %s movies from MySQL into cache", len(movies))
     except Exception as e:
@@ -92,17 +93,19 @@ async def _run_scrape():
         return False
     _scrape_in_progress = True
     try:
-        if data_manager.sources:
-            src = data_manager.sources[0]
-            await src.fetch_movies(force=True)
-            movie_count = len(src._movies)
-            logger.info("Scraper: catalog fetched, %s movies", movie_count)
-            # Fetch details for all movies in batches
-            await src.batch_fetch_details(limit=len(src._movies), concurrency=8)
-            if mysql._pool:
-                all_movies = list(src._movies.values())
-                await mysql.batch_upsert(all_movies)
-                logger.info("Scraper: synced %s movies to MySQL", len(all_movies))
+        for src in data_manager.sources:
+            try:
+                src_name = getattr(src, "name", None) or getattr(src, "SOURCE_NAME", "?")
+                await src.fetch_movies(force=True)
+                movie_count = len(src._movies)
+                logger.info("Scraper[%s]: catalog fetched, %s movies", src_name, movie_count)
+                await src.batch_fetch_details(limit=movie_count, concurrency=8)
+                if mysql._pool and src._movies:
+                    src_movies = list(src._movies.values())
+                    await mysql.batch_upsert(src_movies)
+                    logger.info("Scraper[%s]: synced %s movies to MySQL", src_name, len(src_movies))
+            except Exception as e:
+                logger.warning("Scrape failed for source %s: %s", src, e)
         _last_scrape_time = time.time()
         with open("/tmp/earthvideo_last_scrape.txt", "w") as f:
             f.write(str(_last_scrape_time))
@@ -225,19 +228,16 @@ async def _get_detail(movie_id: str):
     if m and m.posterUrl and not m.posterUrl.endswith('huo.gif'):
         return m
     # On-demand fetch detail page to get real poster/playUrls
-    from src.data_sources import YutuHtmlSource
-    for src in data_manager.sources:
-        if isinstance(src, YutuHtmlSource):
-            try:
-                detail = await src.fetch_detail(movie_id)
-                if detail:
-                    # Save to MySQL
-                    if mysql._pool:
-                        await mysql.upsert_movie(detail)
-                    return detail
-            except Exception:
-                pass
-            break
+    src = data_manager.find_source_for_movie(movie_id)
+    if src is not None:
+        try:
+            detail = await src.fetch_detail(movie_id)
+            if detail:
+                if mysql._pool:
+                    await mysql.upsert_movie(detail)
+                return detail
+        except Exception:
+            pass
     return m
 
 
@@ -246,9 +246,14 @@ async def _get_play_url(movie_id: str, episode: int) -> str:
     url = await mysql.get_play_url(movie_id, episode) if mysql._pool else None
     if url:
         return url
-    m = data_manager.get_movie_by_id(movie_id)
+    src = data_manager.find_source_for_movie(movie_id)
+    m = data_manager.get_movie_by_id(movie_id) if src else None
     if m and m.playUrls and episode in m.playUrls:
         return m.playUrls[episode]
+    if src is not None:
+        url = await src.get_play_url_for_episode(movie_id, episode)
+        if url:
+            return url
     return ""
 
 
@@ -607,18 +612,15 @@ async def movie_play_url(id: str = "", episode: int = 1, source: str = "default"
     video_url = await _get_play_url(id, episode)
     if not video_url:
         # Fallback: try fetching detail page on-demand
-        from src.data_sources import YutuHtmlSource
-        for src in data_manager.sources:
-            if isinstance(src, YutuHtmlSource):
-                video_url = await src.get_play_url_for_episode(id, episode)
-                if video_url:
-                    # Save to MySQL for next time
-                    if m and mysql._pool:
-                        if not m.playUrls:
-                            m.playUrls = {}
-                        m.playUrls[episode] = video_url
-                        await mysql.upsert_movie(m)
-                    break
+        src = data_manager.find_source_for_movie(id)
+        if src is not None:
+            video_url = await src.get_play_url_for_episode(id, episode)
+            if video_url:
+                if m and mysql._pool:
+                    if not m.playUrls:
+                        m.playUrls = {}
+                    m.playUrls[episode] = video_url
+                    await mysql.upsert_movie(m)
 
     if not video_url:
         # Last resort: test videos
