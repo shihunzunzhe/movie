@@ -43,7 +43,7 @@ interface ApiService {
         @Query("genre") genre: String = "all",
         @Query("region") region: String = "all",
         @Query("year") year: String = "all",
-        @Query("sort") sort: String = "最热",
+        @Query("sort") sort: String = "最新",
         @Query("page") page: Int = 1,
         @Query("size") size: Int = 20
     ): ApiResponse<PageData<CategoryItem>>
@@ -69,7 +69,8 @@ interface ApiService {
     suspend fun getPlayUrl(
         @Query("id") id: String,
         @Query("episode") episode: Int = 1,
-        @Query("source") source: String = "default"
+        @Query("source") source: String = "default",
+        @Query("force") force: Int = 0
     ): ApiResponse<PlayUrlResponse>
 
     @GET("api/user/profile")

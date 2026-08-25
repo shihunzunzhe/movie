@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.earthvideo.app.data.model.CategoryItem
 import com.earthvideo.app.ui.theme.*
+import com.earthvideo.app.ui.components.decodeHtml
 
 @Composable
 fun CategoryGridItem(item: CategoryItem, onClick: () -> Unit) {
@@ -61,7 +62,7 @@ fun CategoryGridItem(item: CategoryItem, onClick: () -> Unit) {
                         .background(SemiBlack, RoundedCornerShape(4.dp))
                         .padding(horizontal = 4.dp, vertical = 1.dp)
                 ) {
-                    Text(item.episodeTag, fontSize = 10.sp, color = White)
+                    Text(decodeHtml(item.episodeTag), fontSize = 10.sp, color = White)
                 }
             }
         }

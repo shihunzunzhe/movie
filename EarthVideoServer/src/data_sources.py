@@ -1,4 +1,5 @@
 import asyncio
+import html
 import re
 import time
 import json
@@ -25,13 +26,40 @@ CATEGORY_NAME_MAP = {
 MAX_PAGES = 1
 
 
+def _extract_date_from_url(url: str) -> Optional[str]:
+    """Extract a publish date from a media URL like .../20260821/xxx.m3u8.
+
+    Returns ISO 'YYYY-MM-DD' when a date is found, else None.
+    """
+    if not url:
+        return None
+    m = re.search(r'/(\d{4})(\d{2})(\d{2})/', url)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    m = re.search(r'/(\d{4})-(\d{2})-(\d{2})/', url)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return None
+
+
+def _extract_publish_date(play_urls: Dict[str, Dict[int, str]]) -> Optional[str]:
+    """Look through every stored play URL for the newest date."""
+    best: Optional[str] = None
+    for _sname, eps in (play_urls or {}).items():
+        for _ep, url in (eps or {}).items():
+            d = _extract_date_from_url(str(url))
+            if d and (best is None or d > best):
+                best = d
+    return best
+
+
 def _merge_movie_fields(existing: Movie, fresh: Movie) -> Movie:
     """Union existing and fresh: truthy fields from either side win."""
     for field in [
         'posterUrl', 'description', 'director', 'actors', 'region',
         'year', 'introduction', 'episodeTotal', 'episodeUpdated',
-        'episodeTag', 'playUrls', 'type', 'genre', 'tags', 'rating',
-        'hotTag', 'highlightTitle',
+        'episodeTag', 'type', 'genre', 'tags', 'rating', 'hotTag',
+        'highlightTitle', 'publishDate',
     ]:
         existing_val = getattr(existing, field, None)
         fresh_val = getattr(fresh, field, None)
@@ -39,6 +67,17 @@ def _merge_movie_fields(existing: Movie, fresh: Movie) -> Movie:
             setattr(fresh, field, existing_val)
         elif fresh_val and _is_truthy_field(fresh_val):
             setattr(existing, field, fresh_val)
+
+    existing_play = getattr(existing, 'playUrls', None) or {}
+    fresh_play = getattr(fresh, 'playUrls', None) or {}
+    if existing_play or fresh_play:
+        merged: Dict[str, Dict[int, str]] = dict(existing_play)
+        for sname, eps in fresh_play.items():
+            bucket = dict(merged.get(sname) or {})
+            bucket.update(eps or {})
+            merged[sname] = bucket
+        existing.playUrls = merged
+        fresh.playUrls = merged
     return fresh
 
 
@@ -54,6 +93,8 @@ def _is_truthy_field(v) -> bool:
 
 
 class YutuHtmlSource:
+    SOURCE_NAME = "\u7389\u5154\u6e90"
+
     def __init__(self, base_url: str = "https://yutuzy10.com"):
         self.base_url = base_url.rstrip("/")
         self._movies: Dict[str, Movie] = {}
@@ -216,7 +257,7 @@ class YutuHtmlSource:
                 hotTag=False,
                 rating=0.0,
                 tags="",
-                source="\u7389\u5154\u8d44\u6e90",
+                source=self.SOURCE_NAME,
                 sourceAvatar="",
                 introduction="",
             ))
@@ -298,6 +339,9 @@ class YutuHtmlSource:
                         episode_play_urls[ep_num] = ep_url
 
                 episode_tag = f"{episode_total}\u96c6" if episode_total > 1 else "1\u96c6" if episode_total == 1 else ""
+                play_urls = {
+                    self.SOURCE_NAME: episode_play_urls,
+                } if episode_play_urls else {}
 
                 existing = self._movies.get(movie_id)
                 if existing:
@@ -310,7 +354,8 @@ class YutuHtmlSource:
                     existing.episodeTotal = episode_total
                     existing.episodeUpdated = episode_total
                     existing.episodeTag = episode_tag
-                    existing.playUrls = episode_play_urls
+                    existing.playUrls = play_urls
+                    existing.publishDate = existing.publishDate or _extract_publish_date(play_urls)
                     return existing
 
                 title = existing.title if existing else ""
@@ -327,7 +372,8 @@ class YutuHtmlSource:
                     episodeTotal=episode_total,
                     episodeUpdated=episode_total,
                     episodeTag=episode_tag,
-                    playUrls=episode_play_urls,
+                    playUrls=play_urls,
+                    publishDate=_extract_publish_date(play_urls),
                 )
 
         except Exception as e:
@@ -371,10 +417,17 @@ class YutuHtmlSource:
         logger.info("[yutu] Batch detail fetch: %s/%s success", success, len(need_detail))
         return success
 
-    async def get_play_url_for_episode(self, movie_id: str, episode: int = 1) -> Optional[str]:
+    async def get_play_url_for_episode(
+        self, movie_id: str, episode: int = 1, source: str = "default"
+    ) -> Optional[str]:
         m = await self.fetch_detail(movie_id)
-        if m and m.playUrls and episode in m.playUrls:
-            return m.playUrls[episode]
+        if m and m.playUrls:
+            if source == "default":
+                for sname, eps in m.playUrls.items():
+                    if episode in eps:
+                        return eps[episode]
+            elif source in m.playUrls and episode in m.playUrls[source]:
+                return m.playUrls[source][episode]
         return None
 
     def get_movie_by_id(self, movie_id: str) -> Optional[Movie]:
@@ -403,7 +456,7 @@ class MoguHtmlSource:
     }
 
     MAX_PAGES = 2
-    EPISODES_TO_PRELOAD = 3
+    EPISODES_TO_PRELOAD = 0
 
     def __init__(self, base_url: str = "https://www.5o5k.com"):
         self.base_url = base_url.rstrip("/")
@@ -504,17 +557,13 @@ class MoguHtmlSource:
         category_name = self.CATEGORY_MAP.get(cid, f"\u5206\u7c7b{cid}")
         result: List[Movie] = []
         for vid, raw_title, block in blocks:
-            try:
-                title = html.unescape(raw_title).strip()
-            except AttributeError:
-                from html import unescape as _unescape
-                title = _unescape(raw_title).strip()
+            title = html.unescape(raw_title).strip()
             if not title:
                 continue
             poster_match = re.search(r'data-original="([^"]*)"', block)
             poster = poster_match.group(1).strip() if poster_match else ""
             note_match = re.search(r'<div class="module-item-note">([^<]*)</div>', block)
-            note = note_match.group(1).strip() if note_match else ""
+            note = html.unescape(note_match.group(1).strip()) if note_match else ""
 
             mid = self.make_movie_id(vid)
             result.append(Movie(
@@ -568,17 +617,21 @@ class MoguHtmlSource:
                     movie = existing
                 movie.playUrls = movie.playUrls or {}
 
+                # Derive publish date from the media URL path (e.g. /20260821/...)
+                if not movie.publishDate:
+                    movie.publishDate = _extract_publish_date(movie.playUrls)
+
                 # Preload the first few episode URLs into the canonical movie.
                 sources = self._movie_sources.get(movie_id) or []
                 ep_total = movie.episodeTotal or 1
                 if sources and ep_total >= 1:
-                    best_sid = max(sources, key=lambda s: s[2])[0]
+                    for sid, sname, _ in sources:
+                        movie.playUrls.setdefault(sname, {})
+                    best_sid, best_name, _ = max(sources, key=lambda s: s[2])
                     for ep in range(1, min(self.EPISODES_TO_PRELOAD, ep_total) + 1):
-                        if ep in movie.playUrls:
-                            continue
                         url_ep = await self._fetch_play_url(client, vid, best_sid, ep)
                         if url_ep:
-                            movie.playUrls[ep] = url_ep
+                            movie.playUrls.setdefault(best_name, {})[ep] = url_ep
 
                 self._movies[movie_id] = movie
                 return movie
@@ -748,7 +801,7 @@ class MoguHtmlSource:
             actors=actors,
             episodeTotal=episode_total,
             episodeUpdated=episode_total,
-            episode_tag=episode_tag,
+            episodeTag=episode_tag,
             hotTag=False,
             rating=rating,
             tags="",
@@ -764,7 +817,13 @@ class MoguHtmlSource:
         sid: int,
         nid: int,
     ) -> Optional[str]:
-        """Fetch a play page and extract the actual m3u8 URL from player_aaaa."""
+        """Fetch a play page and extract the actual m3u8 URL from player_aaaa.
+
+        The play page contains a JavaScript snippet like:
+          var player_aaaa = { "url": "...", "encrypt": 1, ... }
+
+        Handles optional whitespace around '=' and nested braces in the JSON.
+        """
         url = f"{self.base_url}/vodplay/{vid}-{sid}-{nid}.html"
         try:
             resp = await client.get(
@@ -773,13 +832,21 @@ class MoguHtmlSource:
             )
             resp.raise_for_status()
             html_text = resp.text
-            # Find player_aaaa= and extract the full JSON object accounting for nested braces.
-            start = html_text.find("player_aaaa=")
-            if start == -1:
+
+            # Find player_aaaa= or player_aaaa = (with optional whitespace)
+            idx = html_text.find("player_aaaa=")
+            if idx == -1:
+                # Try with space: "player_aaaa ="
+                idx = html_text.find("player_aaaa =")
+            if idx == -1:
                 return None
-            brace_start = html_text.find("{", start)
+
+            # Skip past "player_aaaa" and any whitespace and '=' to find '{'
+            brace_start = html_text.find("{", idx)
             if brace_start == -1:
                 return None
+
+            # Extract the JSON object accounting for nested braces.
             depth = 0
             end = brace_start
             for i, ch in enumerate(html_text[brace_start:]):
@@ -792,11 +859,13 @@ class MoguHtmlSource:
                         break
             if depth != 0:
                 return None
+
             raw_json = html_text[brace_start:end]
             data = json.loads(raw_json)
             raw = data.get("url") or ""
             if not raw:
                 return None
+
             encrypt = data.get("encrypt")
             if encrypt == 1:
                 return urllib.parse.unquote(raw)
@@ -861,20 +930,65 @@ class MoguHtmlSource:
             return None
         return max(candidates, key=lambda s: s[2])[0]
 
+    async def _ensure_sources(self, movie_id: str) -> None:
+        """Make sure _movie_sources is populated for a Mogu movie.
+
+        The mapping is per-process; after a restart it has to be rebuilt by
+        re-parsing the detail page.
+        """
+        if self._movie_sources.get(movie_id):
+            return
+        vid = self._parse_vid(movie_id)
+        if not vid:
+            return
+        url = f"{self.base_url}/voddetail/{vid}.html"
+        try:
+            async with httpx.AsyncClient(
+                timeout=30.0,
+                limits=httpx.Limits(max_keepalive_connections=2),
+            ) as client:
+                resp = await client.get(
+                    url,
+                    headers={**self._headers, "referer": f"{self.base_url}/"},
+                )
+                resp.raise_for_status()
+                self._parse_detail_page(resp.text, vid)
+        except Exception as e:
+            logger.warning("[mogu] lazy source load failed for %s: %s", movie_id, e)
+
     async def get_play_url_for_episode(
-        self, movie_id: str, episode: int = 1
+        self, movie_id: str, episode: int = 1, source: str = "default"
     ) -> Optional[str]:
         m = self._movies.get(movie_id)
-        if m and m.playUrls and episode in m.playUrls:
-            return m.playUrls[episode]
+        if m and m.playUrls:
+            if source == "default":
+                for sname, eps in m.playUrls.items():
+                    if episode in eps:
+                        return eps[episode]
+            elif source in m.playUrls and episode in m.playUrls[source]:
+                return m.playUrls[source][episode]
+
+        await self._ensure_sources(movie_id)
 
         vid = self._parse_vid(movie_id)
         if not vid:
             return None
 
-        sid = self._best_source_for_episode(movie_id, episode)
-        if not sid:
-            return None
+        sources = self._movie_sources.get(movie_id) or []
+        if source != "default":
+            candidates = [s for s in sources if s[1] == source]
+            if not candidates:
+                return None
+            sid = max(candidates, key=lambda s: s[2])[0]
+            fallback_name = source
+        else:
+            sid = self._best_source_for_episode(movie_id, episode)
+            if not sid:
+                return None
+            fallback_name = next(
+                (sname for s_id, sname, _ in sources if s_id == sid),
+                self.SOURCE_NAME,
+            )
 
         async with httpx.AsyncClient(
             timeout=30.0,
@@ -884,7 +998,9 @@ class MoguHtmlSource:
 
         if url and m is not None:
             m.playUrls = m.playUrls or {}
-            m.playUrls[episode] = url
+            m.playUrls.setdefault(fallback_name, {})[episode] = url
+            if not m.publishDate:
+                m.publishDate = _extract_publish_date(m.playUrls)
         return url
 
     def get_movie_by_id(self, movie_id: str) -> Optional[Movie]:
@@ -972,12 +1088,16 @@ class DataSourceManager:
         sort_funcs = {
             "\u6700\u70ed": lambda m: (1 if m.hotTag else 0, m.rating),
             "\u8bc4\u5206": lambda m: m.rating,
-            "\u6700\u8fd1\u66f4\u65b0": lambda m: m.episodeUpdated,
-            "\u6700\u65b0\u4e0a\u7ebf": lambda m: m.year,
+            "\u6700\u8fd1\u66f4\u65b0": lambda m: (m.publishDate or "", m.episodeUpdated),
+            "\u6700\u65b0\u4e0a\u7ebf": lambda m: (m.publishDate or "", m.episodeUpdated),
+            "\u6700\u65b0": lambda m: (m.publishDate or "", m.episodeUpdated),
         }
         sf = sort_funcs.get(sort)
         if sf:
             results.sort(key=sf, reverse=True)
+        else:
+            # Default: newest first based on publish date
+            results.sort(key=lambda m: (m.publishDate or ""), reverse=True)
 
         return results
 
@@ -988,9 +1108,19 @@ class DataSourceManager:
                 return m
         return None
 
-    async def get_play_url_for_episode(self, movie_id: str, episode: int = 1) -> Optional[str]:
+    async def get_play_url_for_episode(
+        self, movie_id: str, episode: int = 1, source: str = "default"
+    ) -> Optional[str]:
+        # Route straight to the source that owns this movie id (prefix match),
+        # so e.g. "mogu_*" never hits the yutu source first.
+        owner = self.find_source_for_movie(movie_id)
+        if owner is not None:
+            url = await owner.get_play_url_for_episode(movie_id, episode, source)
+            if url:
+                return url
+        # Fallback: try every source.
         for src in self.sources:
-            url = await src.get_play_url_for_episode(movie_id, episode)
+            url = await src.get_play_url_for_episode(movie_id, episode, source)
             if url:
                 return url
         return None

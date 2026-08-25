@@ -9,6 +9,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -19,15 +21,21 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.earthvideo.app.data.download.DownloadManager
+import com.earthvideo.app.data.download.DownloadTask
 import com.earthvideo.app.data.repository.MovieRepository
 import com.earthvideo.app.ui.theme.*
+import kotlinx.coroutines.launch
 
 data class ProfileMenuItem(
     val icon: ImageVector,
@@ -45,9 +53,19 @@ fun ProfileScreen(
     onNavigateToSettings: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var historyCount by remember { mutableIntStateOf(repository.getLocalHistoryCount()) }
     var favoriteCount by remember { mutableIntStateOf(repository.getLocalFavoriteCount()) }
     var downloadCount by remember { mutableIntStateOf(0) }
+    var showLoginDialog by remember { mutableStateOf(false) }
+    var nicknameInput by remember { mutableStateOf("") }
+
+    // Refresh counts on enter
+    LaunchedEffect(Unit) {
+        historyCount = repository.getLocalHistoryCount()
+        favoriteCount = repository.getLocalFavoriteCount()
+        downloadCount = DownloadManager.tasks.value.count { it.state == DownloadTask.STATE_DONE }
+    }
 
     val toast = remember { mutableStateOf<String?>(null) }
     LaunchedEffect(toast.value) {
@@ -104,7 +122,17 @@ fun ProfileScreen(
                         .align(Alignment.CenterStart)
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .padding(horizontal = 20.dp, vertical = 24.dp),
+                        .padding(horizontal = 20.dp, vertical = 24.dp)
+                        .clickable {
+                            val nick = repository.getNickname()
+                            if (nick.isEmpty()) {
+                                nicknameInput = ""
+                                showLoginDialog = true
+                            } else {
+                                toast.value = "已登录为「$nick」，点击可退出"
+                                repository.logout()
+                            }
+                        },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
@@ -115,24 +143,35 @@ fun ProfileScreen(
                             .border(2.dp, White.copy(alpha = 0.5f), CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            Icons.Default.Person,
-                            contentDescription = null,
-                            tint = White,
-                            modifier = Modifier.size(40.dp)
-                        )
+                        val isLoggedIn = repository.isLoggedIn()
+                        if (isLoggedIn) {
+                            Text(
+                                repository.getNickname().take(1),
+                                fontSize = 28.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = White
+                            )
+                        } else {
+                            Icon(
+                                Icons.Default.Person,
+                                contentDescription = null,
+                                tint = White,
+                                modifier = Modifier.size(40.dp)
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.width(16.dp))
                     Column {
+                        val nick = repository.getNickname()
                         Text(
-                            "登陆/注册",
+                            if (nick.isNotEmpty()) nick else "登陆/注册",
                             fontSize = 22.sp,
                             fontWeight = FontWeight.Bold,
                             color = White
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            "开启大地视频之旅",
+                            if (nick.isNotEmpty()) "点击退出登录" else "开启大地视频之旅",
                             fontSize = 13.sp,
                             color = White.copy(alpha = 0.8f)
                         )
@@ -198,8 +237,28 @@ fun ProfileScreen(
                                 "我的收藏" -> onNavigateToFavorites()
                                 "我的下载" -> onNavigateToDownloads()
                                 "设置" -> onNavigateToSettings()
-                                "上传视频" -> { toast.value = "上传功能开发中" }
-                                "意见反馈" -> { toast.value = "请发送反馈至 support@earthvideo.com" }
+                                "上传视频" -> {
+                                    val intent = android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT).apply {
+                                        type = "video/*"
+                                        addCategory(android.content.Intent.CATEGORY_OPENABLE)
+                                    }
+                                    try {
+                                        (context as? android.app.Activity)?.startActivityForResult(intent, 1001)
+                                    } catch (_: Exception) {
+                                        toast.value = "上传功能即将开放"
+                                    }
+                                }
+                                "意见反馈" -> {
+                                    val intent = android.content.Intent(android.content.Intent.ACTION_SENDTO).apply {
+                                        data = android.net.Uri.parse("mailto:support@earthvideo.com")
+                                        putExtra(android.content.Intent.EXTRA_SUBJECT, "大地视频 反馈")
+                                    }
+                                    try {
+                                        context.startActivity(intent)
+                                    } catch (_: Exception) {
+                                        toast.value = "请发送邮件至 support@earthvideo.com"
+                                    }
+                                }
                             }
                         }
                         if (index < menuItems.lastIndex) {
@@ -225,6 +284,44 @@ fun ProfileScreen(
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
         }
+    }
+
+    // Login dialog
+    if (showLoginDialog) {
+        AlertDialog(
+            onDismissRequest = { showLoginDialog = false },
+            title = { Text("设置昵称", fontWeight = FontWeight.Bold) },
+            text = {
+                OutlinedTextField(
+                    value = nicknameInput,
+                    onValueChange = { nicknameInput = it.take(16) },
+                    placeholder = { Text("输入昵称") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = {
+                        if (nicknameInput.isNotBlank()) {
+                            repository.setNickname(nicknameInput.trim())
+                            showLoginDialog = false
+                        }
+                    })
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (nicknameInput.isNotBlank()) {
+                        repository.setNickname(nicknameInput.trim())
+                        showLoginDialog = false
+                    }
+                }) {
+                    Text("确定", color = Primary, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLoginDialog = false }) {
+                    Text("取消", color = TextSecondary)
+                }
+            }
+        )
     }
 }
 

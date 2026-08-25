@@ -42,14 +42,15 @@ import com.earthvideo.app.ui.theme.*
 fun DiscoverScreen(
     repository: MovieRepository,
     onMovieClick: (String) -> Unit,
-    onSearchClick: () -> Unit
+    onSearchClick: () -> Unit,
+    onTopicSearch: (String) -> Unit = { onSearchClick() }
 ) {
     var items by remember { mutableStateOf(listOf<CategoryItem>()) }
     var selectedType by remember { mutableStateOf("all") }
     var selectedGenre by remember { mutableStateOf("all") }
     var selectedRegion by remember { mutableStateOf("all") }
     var selectedYear by remember { mutableStateOf("all") }
-    var selectedSort by remember { mutableStateOf("最热") }
+    var selectedSort by remember { mutableStateOf("最新") }
     var selectedTab by remember { mutableStateOf("category") }
     var isLoading by remember { mutableStateOf(true) }
     var isRefreshing by remember { mutableStateOf(false) }
@@ -77,7 +78,7 @@ fun DiscoverScreen(
         "all" to "全部", "2026" to "2026", "2025" to "2025",
         "2024" to "2024", "2023" to "2023", "更早" to "更早"
     )
-    val sortOptions = listOf("最热" to "最热", "评分" to "评分", "最新上线" to "最新")
+    val sortOptions = listOf("最新" to "最新", "最热" to "最热", "评分" to "评分", "最新上线" to "最新")
 
     suspend fun loadList(page: Int, refresh: Boolean = false) {
         if (selectedTab != "category") return
@@ -285,13 +286,13 @@ fun DiscoverScreen(
             }
         } else {
             // Topic tab
-            TopicView(onMovieClick = onMovieClick)
+            TopicView(onTopicClick = onTopicSearch)
         }
     }
 }
 
 @Composable
-private fun TopicView(onMovieClick: (String) -> Unit) {
+private fun TopicView(onTopicClick: (String) -> Unit) {
     val topics = listOf(
         Triple("高分经典", "IMDb Top 250 精选", "FF9800"),
         Triple("国产佳作", "华语影视巅峰", "F44336"),
@@ -310,7 +311,7 @@ private fun TopicView(onMovieClick: (String) -> Unit) {
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         items(topics) { (title, subtitle, color) ->
-            TopicCard(title = title, subtitle = subtitle, color = color, onClick = { /* could navigate */ })
+            TopicCard(title = title, subtitle = subtitle, color = color, onClick = { onTopicClick(title) })
         }
     }
 }

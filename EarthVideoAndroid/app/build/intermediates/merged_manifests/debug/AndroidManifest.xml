@@ -24,6 +24,7 @@
         android:extractNativeLibs="false"
         android:label="大地视频"
         android:supportsRtl="true"
+        android:testOnly="true"
         android:theme="@style/Theme.EarthVideo"
         android:usesCleartextTraffic="true" >
         <activity

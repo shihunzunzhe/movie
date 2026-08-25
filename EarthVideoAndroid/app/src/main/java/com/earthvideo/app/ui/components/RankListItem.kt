@@ -20,6 +20,7 @@ import coil.compose.AsyncImage
 import com.earthvideo.app.data.model.Movie
 import com.earthvideo.app.data.model.RankItem
 import com.earthvideo.app.ui.theme.*
+import com.earthvideo.app.ui.components.decodeHtml
 
 @Composable
 fun RankListItem(rankItem: RankItem, onClick: () -> Unit) {
@@ -78,16 +79,16 @@ fun RankListItem(rankItem: RankItem, onClick: () -> Unit) {
         Spacer(modifier = Modifier.width(12.dp))
         // Info
         Column(modifier = Modifier.weight(1f)) {
-            Text(movie.title, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextPrimary, maxLines = 1)
+            Text(decodeHtml(movie.title), fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextPrimary, maxLines = 1)
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                "${movie.year} ${movie.type} ${movie.region}",
+                "${movie.year} ${decodeHtml(movie.type)} ${decodeHtml(movie.region)}",
                 fontSize = 13.sp,
                 color = TextHint,
                 maxLines = 1
             )
             if (movie.director.isNotEmpty()) {
-                Text("导演：${movie.director}", fontSize = 13.sp, color = TextHint, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("导演：${decodeHtml(movie.director)}", fontSize = 13.sp, color = TextHint, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             if (movie.actors.isNotEmpty()) {
                 Text("主演：${movie.actors.take(4).joinToString(" ")}", fontSize = 13.sp, color = TextHint, maxLines = 1, overflow = TextOverflow.Ellipsis)

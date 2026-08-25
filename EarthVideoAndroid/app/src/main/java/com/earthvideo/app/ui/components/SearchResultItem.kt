@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.earthvideo.app.data.model.Movie
 import com.earthvideo.app.ui.theme.*
+import com.earthvideo.app.ui.components.decodeHtml
 
 @Composable
 fun SearchResultItem(movie: Movie, onClick: () -> Unit) {
@@ -118,18 +119,28 @@ fun SearchResultItem(movie: Movie, onClick: () -> Unit) {
             )
             Spacer(modifier = Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (movie.source.isNotEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .background(SourceBadgeBg, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(decodeHtml(movie.source), fontSize = 11.sp, color = White, fontWeight = FontWeight.Medium)
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
                 if (movie.type.isNotEmpty()) {
                     Box(
                         modifier = Modifier
                             .background(ChipBg, RoundedCornerShape(4.dp))
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
-                        Text(movie.type, fontSize = 11.sp, color = Primary)
+                        Text(decodeHtml(movie.type), fontSize = 11.sp, color = Primary)
                     }
                     Spacer(modifier = Modifier.width(6.dp))
                 }
                 if (movie.region.isNotEmpty()) {
-                    Text(movie.region, fontSize = 12.sp, color = TextHint)
+                    Text(decodeHtml(movie.region), fontSize = 12.sp, color = TextHint)
                     Spacer(modifier = Modifier.width(6.dp))
                 }
                 if (movie.year > 0) {
@@ -159,7 +170,7 @@ fun SearchResultItem(movie: Movie, onClick: () -> Unit) {
             if (movie.episodeTag.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    movie.episodeTag,
+                    decodeHtml(movie.episodeTag),
                     fontSize = 12.sp,
                     color = Primary,
                     fontWeight = FontWeight.Medium

@@ -34,7 +34,8 @@ class Movie(BaseModel):
     sourceAvatar: str = ""
     highlightTitle: Optional[str] = None
     introduction: Optional[str] = ""
-    playUrls: Dict[int, str] = {}
+    publishDate: Optional[str] = None
+    playUrls: Dict[str, Dict[int, str]] = {}
 
 class Episode(BaseModel):
     episodeNumber: int

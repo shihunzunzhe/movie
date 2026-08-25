@@ -15,6 +15,10 @@ class LocalStorage(context: Context) {
     private companion object {
         private const val KEY_HISTORY = "history_movies"
         private const val KEY_FAVORITES = "favorite_movies"
+        private const val KEY_NICKNAME = "user_nickname"
+        private const val KEY_WIFI_ONLY = "wifi_only"
+        private const val KEY_KEEP_SCREEN = "keep_screen_on"
+        private const val KEY_COMMENTS = "local_comments"
         private const val MAX_HISTORY = 200
     }
 
@@ -82,4 +86,57 @@ class LocalStorage(context: Context) {
     }
 
     fun getFavoriteCount(): Int = getFavoriteMovies().size
+
+    // -------------------------------------------------------------------------
+    // User nickname (local login)
+    // -------------------------------------------------------------------------
+
+    fun getNickname(): String = prefs.getString(KEY_NICKNAME, null) ?: ""
+
+    fun setNickname(name: String) {
+        prefs.edit().putString(KEY_NICKNAME, name).apply()
+    }
+
+    fun isLoggedIn(): Boolean = getNickname().isNotEmpty()
+
+    fun logout() {
+        prefs.edit().remove(KEY_NICKNAME).apply()
+    }
+
+    // -------------------------------------------------------------------------
+    // Settings persistence
+    // -------------------------------------------------------------------------
+
+    fun isWifiOnly(): Boolean = prefs.getBoolean(KEY_WIFI_ONLY, true)
+
+    fun setWifiOnly(v: Boolean) = prefs.edit().putBoolean(KEY_WIFI_ONLY, v).apply()
+
+    fun isKeepScreenOn(): Boolean = prefs.getBoolean(KEY_KEEP_SCREEN, true)
+
+    fun setKeepScreenOn(v: Boolean) = prefs.edit().putBoolean(KEY_KEEP_SCREEN, v).apply()
+
+    // -------------------------------------------------------------------------
+    // Local comments (per movie, simple JSON persistence)
+    // -------------------------------------------------------------------------
+
+    data class Comment(val movieId: String, val text: String, val time: Long = System.currentTimeMillis())
+
+    fun getComments(movieId: String): List<Comment> {
+        val json = prefs.getString(KEY_COMMENTS, null) ?: return emptyList()
+        return try {
+            val type = object : TypeToken<List<Comment>>() {}.type
+            val all: List<Comment> = gson.fromJson(json, type) ?: emptyList()
+            all.filter { it.movieId == movieId }.sortedByDescending { it.time }
+        } catch (e: Exception) { emptyList() }
+    }
+
+    fun addComment(movieId: String, text: String) {
+        val all = try {
+            val json = prefs.getString(KEY_COMMENTS, null) ?: "[]"
+            val type = object : TypeToken<List<Comment>>() {}.type
+            gson.fromJson(json, type) ?: mutableListOf<Comment>()
+        } catch (e: Exception) { mutableListOf<Comment>() }
+        (all as MutableList).add(Comment(movieId, text))
+        prefs.edit().putString(KEY_COMMENTS, gson.toJson(all)).apply()
+    }
 }

@@ -29,6 +29,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -43,15 +44,23 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import java.io.File
 import com.earthvideo.app.data.api.RetrofitClient
+import com.earthvideo.app.data.download.PlaybackPrefetch
 import com.earthvideo.app.data.model.*
 import com.earthvideo.app.data.repository.MovieRepository
 import com.earthvideo.app.ui.theme.*
+import com.earthvideo.app.ui.components.decodeHtml
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -66,7 +75,8 @@ fun PlayerScreen(
     movieId: String,
     initialEpisode: Int,
     repository: MovieRepository,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    localDir: String? = null
 ) {
     var movie by remember { mutableStateOf<Movie?>(null) }
     var episodes by remember { mutableStateOf(listOf<Episode>()) }
@@ -76,9 +86,11 @@ fun PlayerScreen(
     var isFavorite by remember { mutableStateOf(false) }
     var showIntroduction by remember { mutableStateOf(false) }
     var showSourceDialog by remember { mutableStateOf(false) }
+    var showDownloadDialog by remember { mutableStateOf(false) }
+    var showCommentDialog by remember { mutableStateOf(false) }
+    var commentInput by remember { mutableStateOf("") }
     var currentSources by remember { mutableStateOf(listOf<PlaySource>()) }
     var selectedSource by remember { mutableStateOf("default") }
-    var showEpisodePanel by remember { mutableStateOf(false) }
     var playerError by remember { mutableStateOf<String?>(null) }
     var isBuffering by remember { mutableStateOf(false) }
     var isPlaying by remember { mutableStateOf(true) }
@@ -88,12 +100,29 @@ fun PlayerScreen(
     var playbackSpeed by remember { mutableFloatStateOf(1.0f) }
     val speedOptions = listOf(1.0f, 1.5f, 2.0f, 3.0f, 0.5f)
     var userInteracting by remember { mutableStateOf(false) }
+    // Auto-switch guard: prevents re-entrant source switching when
+    // onPlayerError fires while LaunchedEffect is already reloading.
+    var _autoSwitching by remember { mutableStateOf(false) }
+    // Direct CDN play first; flip to true to retry through /api/proxy/hls.
+    var useProxy by remember { mutableStateOf(false) }
     // Swipe seek state
     var swipeSeekDelta by remember { mutableLongStateOf(0L) }
     var isSwiping by remember { mutableStateOf(false) }
     var swipeStartPosition by remember { mutableLongStateOf(0L) }
     // Data loaded flag for detail page
     var detailLoaded by remember { mutableStateOf(false) }
+    // Actual video aspect ratio (width / height), updated from player
+    
+    val DEFAULT_ASPECT = 16f / 9f
+    var videoAspect by remember { mutableFloatStateOf(DEFAULT_ASPECT) }
+    // Preloaded next-episode play URL (prevents stall when switching episodes)
+    var preloadedEpisode by remember { mutableIntStateOf(-1) }
+    var preloadedUrl by remember { mutableStateOf("") }
+    // Whole-episode disk prefetch state
+    var prefetchedKeys by remember { mutableStateOf(listOf<String>()) }
+    var prefetchProgress by remember { mutableIntStateOf(-1) } // -1 idle/done; 0..99 prefetching
+    // Batch download dialog selection
+    var selectedDownloadEps by remember { mutableStateOf(setOf<Int>()) }
 
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -101,7 +130,8 @@ fun PlayerScreen(
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val baseUrl = remember { RetrofitClient.getBaseUrl() }
 
-    // Toggle fullscreen
+    // Toggle fullscreen — force landscape for typical fullscreen experience.
+    // Portrait videos use RESIZE_MODE_FIT so they show completely (with side bars).
     fun toggleFullscreen(full: Boolean) {
         try {
             val activity = context as? android.app.Activity
@@ -136,9 +166,28 @@ fun PlayerScreen(
         }
     }
 
-    val dataSourceFactory = remember { DefaultHttpDataSource.Factory() }
+    // HTTP source ＋ shared 300MB disk cache. Play the CDN URL directly (same
+    // path a browser uses) so nested HLS masters like
+    //   index.m3u8 → 2000k/hls/index.m3u8 → foo.ts
+    // resolve against the media playlist directory. The server proxy is only
+    // a fallback when the CDN is unreachable from the device.
+    val playerUa = PlaybackPrefetch.PLAYER_UA
+    val dataSourceFactory = remember {
+        CacheDataSource.Factory()
+            .setCache(PlaybackPrefetch.cache(context))
+            .setUpstreamDataSourceFactory(
+                DefaultHttpDataSource.Factory()
+                    .setUserAgent(playerUa)
+                    .setAllowCrossProtocolRedirects(true)
+            )
+    }
     val player = remember {
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(60000, 250000, 10000, 30000)
+            .build()
         ExoPlayer.Builder(context)
+            .setLoadControl(loadControl)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .build().apply {
             playWhenReady = true
             setHandleAudioBecomingNoisy(true)
@@ -150,12 +199,54 @@ fun PlayerScreen(
                         durationMs = duration.coerceAtLeast(0L)
                         detailLoaded = true
                     }
+                    // Episode finished: free its disk cache for the next one.
+                    if (playbackState == Player.STATE_ENDED && prefetchedKeys.isNotEmpty()) {
+                        PlaybackPrefetch.releaseSegments(context, prefetchedKeys)
+                        prefetchedKeys = emptyList()
+                        prefetchProgress = -1
+                    }
                 }
                 override fun onIsPlayingChanged(playing: Boolean) {
                     isPlaying = playing
                 }
+                override fun onVideoSizeChanged(videoSize: VideoSize) {
+                    // Adjust the player area to the video's real resolution/aspect ratio.
+                    var w = videoSize.width
+                    var h = videoSize.height
+                    val rot = videoSize.unappliedRotationDegrees
+                    if (rot == 90 || rot == 270) {
+                        val t = w; w = h; h = t
+                    }
+                    if (w > 0 && h > 0) {
+                        videoAspect = w.toFloat() / h.toFloat()
+                    }
+                }
                 override fun onPlayerError(error: PlaybackException) {
-                    playerError = "播放出错: " + (error.message ?: "未知错误")
+                    val msg = error.message ?: ""
+                    val cause = error.cause?.message ?: ""
+                    val isHttpFail = msg.contains("Source error", ignoreCase = true) ||
+                        cause.contains("Response code", ignoreCase = true) ||
+                        cause.contains("404") || cause.contains("403") ||
+                        cause.contains("Unable to connect", ignoreCase = true)
+                    // Direct CDN play failed: retry once through the HLS proxy so
+                    // the phone never has to reach the CDN itself.
+                    if (isHttpFail && !useProxy && playUrl.isNotEmpty() &&
+                        !playUrl.startsWith("file://")
+                    ) {
+                        useProxy = true
+                        return
+                    }
+                    // Auto-switch to the next source when the current one is dead.
+                    if (currentSources.size > 1 && !_autoSwitching) {
+                        val idx = currentSources.indexOfFirst { it.sourceId == selectedSource }
+                        if (idx >= 0 && idx < currentSources.size - 1) {
+                            _autoSwitching = true
+                            val next = currentSources[idx + 1]
+                            selectedSource = next.sourceId
+                            return  // LaunchedEffect(currentEpisode, selectedSource) reloads
+                        }
+                    }
+                    playerError = "播放出错: " + (msg.take(80))
                 }
             })
         }
@@ -182,33 +273,53 @@ fun PlayerScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            if (prefetchedKeys.isNotEmpty()) {
+                PlaybackPrefetch.releaseSegments(context, prefetchedKeys)
+                prefetchedKeys = emptyList()
+            }
             player.stop()
             player.release()
         }
     }
 
+    // Proxy the m3u8 through the server. Used as a fallback when the device
+    // cannot reach the CDN. Nested playlists stay nested; the proxy rewrites
+    // each URI against THAT playlist's URL.
+    fun proxyHlsUrl(finalUrl: String): String {
+        val encoded = java.net.URLEncoder.encode(finalUrl, "UTF-8")
+        return baseUrl.trimEnd('/') + "/api/proxy/hls?url=" + encoded
+    }
+
     fun loadUrl(url: String) {
         if (url.isEmpty()) return
         playerError = null
-        var finalUrl = if (url.startsWith("/")) {
+        // Reset to the default area ratio until the new video reports its real size.
+        videoAspect = DEFAULT_ASPECT
+        val finalUrl = if (url.startsWith("/")) {
             baseUrl.trimEnd('/') + url
         } else {
             url
         }
         try {
-            val effectiveUrl: String
-            if (finalUrl.contains(".m3u8", ignoreCase = true) && !finalUrl.contains("/proxy/hls")) {
-                val encoded = java.net.URLEncoder.encode(finalUrl, "UTF-8")
-                effectiveUrl = baseUrl.trimEnd('/') + "/api/proxy/hls?url=" + encoded + "&skip_seconds=5"
-            } else {
-                effectiveUrl = finalUrl
-            }
+            // Play CDN URLs directly (browser path). Nested HLS masters then
+            // resolve relative segments against the media playlist directory,
+            // which is the only path the CDN actually serves.
+            val effectiveUrl = finalUrl
             player.stop()
             player.clearMediaItems()
-            val isHls = effectiveUrl.contains(".m3u8", ignoreCase = true) || effectiveUrl.contains("/proxy/hls", ignoreCase = true) || effectiveUrl.contains("application/vnd.apple.mpegurl")
+            val isLocal = effectiveUrl.startsWith("file://")
+            val isHls = isLocal ||
+                effectiveUrl.contains(".m3u8", ignoreCase = true) ||
+                effectiveUrl.contains("/proxy/hls", ignoreCase = true) ||
+                effectiveUrl.contains("application/vnd.apple.mpegurl")
             val mediaItem = MediaItem.fromUri(effectiveUrl)
             if (isHls) {
-                val hlsSource = HlsMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+                val factory = if (isLocal) {
+                    DefaultDataSource.Factory(context, DefaultHttpDataSource.Factory())
+                } else {
+                    dataSourceFactory
+                }
+                val hlsSource = HlsMediaSource.Factory(factory).createMediaSource(mediaItem)
                 player.setMediaSources(listOf(hlsSource))
             } else {
                 player.setMediaItem(mediaItem)
@@ -219,8 +330,35 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(playUrl) {
-        if (playUrl.isNotEmpty()) {
+    // Actively prefetch the WHOLE current episode into the shared disk cache.
+    // Segments previously cached are released first so the full episode fits.
+    LaunchedEffect(currentEpisode, movieId, playUrl) {
+        if (prefetchedKeys.isNotEmpty()) {
+            PlaybackPrefetch.releaseSegments(context, prefetchedKeys)
+            prefetchedKeys = emptyList()
+            prefetchProgress = -1
+        }
+        if (playUrl.isEmpty() || playUrl.startsWith("file://")) return@LaunchedEffect
+        try {
+            prefetchProgress = 0
+            val keys = PlaybackPrefetch.prefetchEpisode(
+                context,
+                playUrl
+            ) { done, total ->
+                if (total > 0) prefetchProgress = done * 100 / total
+            }
+            prefetchedKeys = keys
+            prefetchProgress = -1
+        } catch (e: Exception) {
+            prefetchProgress = -1
+        }
+    }
+
+    LaunchedEffect(playUrl, useProxy) {
+        if (playUrl.isEmpty()) return@LaunchedEffect
+        if (useProxy && !playUrl.startsWith("file://")) {
+            loadUrl(proxyHlsUrl(playUrl))
+        } else {
             loadUrl(playUrl)
         }
     }
@@ -228,37 +366,89 @@ fun PlayerScreen(
     // Load data - always show data as soon as it arrives
     LaunchedEffect(movieId) {
         try {
-            movie = repository.getMovieDetail(movieId)
-            // Mark detail loaded immediately, don't wait for episodes
-            detailLoaded = true
-            val epResp = repository.getMovieEpisodes(movieId)
-            episodes = epResp.episodes.sortedBy { it.episodeNumber }
-            if (currentEpisode > episodes.size) currentEpisode = 1
-            val urlResp = repository.getPlayUrl(movieId, currentEpisode)
-            playUrl = urlResp.url
-            currentSources = urlResp.sources
-            isFavorite = repository.isLocalFavorite(movieId)
-            movie?.let { repository.addLocalHistory(it) }
+            if (localDir != null) {
+                // Offline playback of a downloaded episode (no network needed).
+                val localEpisode = repository.localEpisode(localDir)
+                movie = repository.localMovie(localDir)
+                episodes = listOf(
+                    Episode(
+                        episodeNumber = localEpisode,
+                        title = "第${localEpisode}集",
+                        duration = 0,
+                        current = true
+                    )
+                )
+                currentEpisode = localEpisode
+                val idxPath = repository.localIndexPath(localDir)
+                playUrl = if (idxPath != null) "file://$idxPath" else ""
+                currentSources = emptyList()
+                detailLoaded = true
+            } else {
+                movie = repository.getMovieDetail(movieId)
+                val epResp = repository.getMovieEpisodes(movieId)
+                episodes = epResp.episodes.sortedBy { it.episodeNumber }
+                // Mark detail loaded AFTER movie, episodes, and play URL are all fetched
+                detailLoaded = true
+                if (currentEpisode > episodes.size) currentEpisode = 1
+                val urlResp = repository.getPlayUrl(movieId, currentEpisode)
+                playUrl = urlResp.url
+                useProxy = false
+                currentSources = urlResp.sources
+                selectedSource = urlResp.sources.firstOrNull()?.sourceId ?: "default"
+                isFavorite = repository.isLocalFavorite(movieId)
+                movie?.let { repository.addLocalHistory(it) }
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
         isLoading = false
     }
 
-    LaunchedEffect(currentEpisode) {
+    LaunchedEffect(currentEpisode, selectedSource) {
+        _autoSwitching = false
         playerError = null
         if (currentEpisode > 0 && movie != null) {
             try {
-                val urlResp = repository.getPlayUrl(movieId, currentEpisode)
+                // Use the preloaded URL when it matches the target episode.
+                val urlResp: PlayUrlResponse =
+                    if (preloadedEpisode == currentEpisode && preloadedUrl.isNotEmpty()) {
+                        PlayUrlResponse(movieId, currentEpisode, preloadedUrl, currentSources)
+                    } else {
+                        repository.getPlayUrl(movieId, currentEpisode, selectedSource)
+                    }
                 playUrl = urlResp.url
+                useProxy = false
                 positionMs = 0L
                 swipeSeekDelta = 0L
             } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
+    // Background preload of the NEXT episode, so switching episodes starts instantly.
+    LaunchedEffect(movieId, currentEpisode, selectedSource, episodes.size) {
+        if (currentEpisode < episodes.size && movie != null) {
+            try {
+                val resp = repository.getPlayUrl(movieId, currentEpisode + 1, selectedSource)
+                if (resp.url.isNotEmpty()) {
+                    preloadedEpisode = currentEpisode + 1
+                    preloadedUrl = resp.url
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
     fun toast(msg: String) {
         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+    }
+
+    fun shareMovie() {
+        val title = movie?.title ?: "视频"
+        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(android.content.Intent.EXTRA_TEXT, "看「$title」第${currentEpisode}集，推荐给你！\n$baseUrl")
+            putExtra(android.content.Intent.EXTRA_SUBJECT, "大地视频 - $title")
+        }
+        context.startActivity(android.content.Intent.createChooser(intent, "分享到"))
     }
 
     BackHandler(enabled = isLandscape) {
@@ -275,12 +465,15 @@ fun PlayerScreen(
             .background(if (isLandscape) PlayerBg else PageBg)
     ) {
         // ============ Player section ============
+        // Portrait: the area matches the video's real aspect ratio (16:9, 4:3, 9:16...),
+        // clamped to sane bounds so extreme ratios do not swallow the whole screen.
+        // Landscape (fullscreen): cover the entire screen area.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .then(
-                    if (isLandscape) Modifier.fillMaxHeight()
-                    else Modifier.aspectRatio(16f / 9f)
+                    if (isLandscape) Modifier.fillMaxSize()
+                    else Modifier.aspectRatio(videoAspect.coerceIn(0.4f, 2.4f))
                 )
                 .background(PlayerBg)
         ) {
@@ -291,9 +484,28 @@ fun PlayerScreen(
                 isBuffering = isBuffering,
                 isLoading = isLoading && !detailLoaded,
                 currentEpisode = currentEpisode,
+                isLandscape = isLandscape,
                 onTap = { controlsVisible = !controlsVisible },
                 onRetry = {
-                    if (playUrl.isNotEmpty()) loadUrl(playUrl)
+                    scope.launch {
+                        try {
+                            // Force the server to re-fetch from 5o5k.com
+                            // (skip its cached dead URL).
+                            val urlResp = repository.getPlayUrl(
+                                movieId, currentEpisode, selectedSource, force = 1
+                            )
+                            if (urlResp.url.isNotEmpty()) {
+                                playUrl = urlResp.url
+                                currentSources = urlResp.sources
+                                selectedSource = urlResp.actualSource ?: selectedSource
+                                loadUrl(playUrl)
+                            } else {
+                                playerError = "该资源暂时无法播放，请稍后重试"
+                            }
+                        } catch (e: Exception) {
+                            playerError = "加载失败: ${e.message?.take(40) ?: "未知错误"}"
+                        }
+                    }
                 },
                 isSwiping = isSwiping,
                 swipeSeekDelta = swipeSeekDelta,
@@ -314,8 +526,13 @@ fun PlayerScreen(
                     swipeSeekDelta = 0L
                     userInteracting = false
                 },
+                showSourceSwitch = currentSources.size > 1,
+                onSwitchSource = { showSourceDialog = true },
                 modifier = Modifier.fillMaxSize()
             )
+
+            // Prefetch progress overlay removed (was "整集缓存 N%")
+            // The prefetch still runs in the background to fill the disk cache.
 
             // Top bar overlay - compact in landscape
             androidx.compose.animation.AnimatedVisibility(
@@ -407,19 +624,6 @@ fun PlayerScreen(
             }
         }
 
-        // Episode selector panel (below player, portrait only)
-        if (showEpisodePanel && episodes.isNotEmpty() && !isLandscape) {
-            EpisodeSelectorPanel(
-                episodes = episodes,
-                currentEpisode = currentEpisode,
-                onSelect = { ep ->
-                    currentEpisode = ep
-                    showEpisodePanel = false
-                },
-                onClose = { showEpisodePanel = false }
-            )
-        }
-
         // ============ Info section (portrait only) ============
         if (!isLandscape) {
             if (isLoading && !detailLoaded) {
@@ -431,193 +635,272 @@ fun PlayerScreen(
                 Box(modifier = Modifier.fillMaxSize().background(PageBg)) {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
                     ) {
-                        // Title + action buttons row
+                        // ===== Title =====
                         item {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    m?.title ?: "",
-                                    fontSize = 20.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = TextPrimary,
-                                    modifier = Modifier.weight(1f),
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                if (episodes.isNotEmpty()) {
-                                    FilledTonalButton(
-                                        onClick = { showEpisodePanel = true },
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                        colors = ButtonDefaults.filledTonalButtonColors(
-                                            containerColor = PrimaryLight.copy(alpha = 0.15f),
-                                            contentColor = Primary
-                                        )
-                                    ) {
-                                        Icon(Icons.Default.List, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("第${currentEpisode}集 / 共${episodes.size}集", fontSize = 12.sp)
-                                    }
-                                }
-                                if (currentSources.isNotEmpty()) {
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    SourceChip(label = "播放源", onClick = { showSourceDialog = true })
-                                }
-                            }
+                            Text(
+                                decodeHtml(m?.title ?: ""),
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
 
-                        // Action buttons row
+                        // ===== Rating + meta tags =====
                         item {
                             Spacer(modifier = Modifier.height(8.dp))
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                PlayerAction(
-                                    icon = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                                    label = "收藏",
-                                    tint = if (isFavorite) HotRed else TextSecondary,
-                                    onClick = {
-                                        scope.launch {
-                                        movie?.let { m ->
-                                            isFavorite = repository.toggleLocalFavorite(m)
-                                        }
-                                        }
-                                    }
-                                )
-                                PlayerAction(
-                                    icon = Icons.Default.Comment,
-                                    label = "评论",
-                                    tint = TextSecondary,
-                                    onClick = { toast("评论功能即将上线") }
-                                )
-                                PlayerAction(
-                                    icon = Icons.Default.Share,
-                                    label = "分享",
-                                    tint = TextSecondary,
-                                    onClick = { toast("分享功能即将上线") }
-                                )
-                            }
-                        }
-
-                        // Rating + meta info
-                        item {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 if (m?.rating != null && m.rating > 0) {
                                     Text(
                                         "★ %.1f".format(m.rating),
-                                        fontSize = 14.sp,
+                                        fontSize = 15.sp,
                                         color = Gold,
                                         fontWeight = FontWeight.Bold
                                     )
-                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Spacer(modifier = Modifier.width(10.dp))
                                 }
                                 if (m?.year != null && m.year > 0) {
-                                    Text("${m.year}", fontSize = 13.sp, color = TextHint)
+                                    Text("${m.year}", fontSize = 13.sp, color = TextSecondary)
                                     Spacer(modifier = Modifier.width(8.dp))
                                 }
                                 if (m?.type != null && m.type.isNotEmpty()) {
-                                    Surface(color = TabBg, shape = RoundedCornerShape(4.dp)) {
-                                        Text(m.type, fontSize = 11.sp, color = TextSecondary, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                                    }
+                                    MetaTag(decodeHtml(m.type))
                                 }
                                 if (m?.region != null && m.region.isNotEmpty()) {
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Surface(color = TabBg, shape = RoundedCornerShape(4.dp)) {
-                                        Text(m.region, fontSize = 11.sp, color = TextSecondary, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                                    }
+                                    MetaTag(decodeHtml(m.region))
                                 }
                             }
                         }
 
-                        // Director and actors (show if available)
+                        // ===== Director / actors =====
                         if (m?.director != null && m.director.isNotEmpty()) {
                             item {
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text("导演：${m.director}", fontSize = 13.sp, color = TextSecondary)
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text("导演：${decodeHtml(m.director)}", fontSize = 13.sp, color = TextSecondary)
                             }
                         }
                         if (m?.actors != null && m.actors.isNotEmpty()) {
                             item {
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text("主演：${m.actors.take(5).joinToString(" / ")}", fontSize = 13.sp, color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "主演：${m.actors.take(5).joinToString(" / ")}",
+                                    fontSize = 13.sp,
+                                    color = TextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
 
-                        // Introduction
-                        val intro = m?.introduction ?: ""
-                        if (intro.isNotEmpty()) {
+                        // ===== Action row =====
+                        item {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceEvenly
+                            ) {
+                                RoundAction(
+                                    icon = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                    label = "收藏",
+                                    tint = if (isFavorite) HotRed else TextSecondary,
+                                    active = isFavorite,
+                                    onClick = {
+                                        scope.launch {
+                                            movie?.let { fm -> isFavorite = repository.toggleLocalFavorite(fm) }
+                                        }
+                                    }
+                                )
+                                RoundAction(
+                                    icon = Icons.Default.Comment,
+                                    label = "评论",
+                                    tint = TextSecondary,
+                                    active = false,
+                                    onClick = { showCommentDialog = true }
+                                )
+                                RoundAction(
+                                    icon = Icons.Default.Share,
+                                    label = "分享",
+                                    tint = TextSecondary,
+                                    active = false,
+                                    onClick = { shareMovie() }
+                                )
+                                if (localDir == null && playUrl.isNotEmpty() && !playUrl.startsWith("file://")) {
+                                    RoundAction(
+                                        icon = Icons.Default.CloudDownload,
+                                        label = "下载",
+                                        tint = TextSecondary,
+                                        active = false,
+                                        onClick = {
+                                            selectedDownloadEps = setOf(currentEpisode)
+                                            showDownloadDialog = true
+                                        }
+                                    )
+                                }
+                            }
+                        }
+
+                        // ===== Play source selector =====
+                        if (currentSources.isNotEmpty()) {
                             item {
                                 Spacer(modifier = Modifier.height(8.dp))
-                                val maxLines = if (showIntroduction) Int.MAX_VALUE else 3
-                                Text(
-                                    intro,
-                                    fontSize = 14.sp,
-                                    color = TextPrimary,
-                                    lineHeight = 22.sp,
-                                    maxLines = maxLines,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                if (intro.length > 100) {
-                                    TextButton(
-                                        onClick = { showIntroduction = !showIntroduction },
-                                        contentPadding = PaddingValues(0.dp)
+                                Surface(
+                                    color = CardBg,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { showSourceDialog = true }
+                                            .padding(14.dp),
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
+                                        Icon(
+                                            Icons.Default.PlayArrow,
+                                            contentDescription = null,
+                                            tint = Primary,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("播放源", fontSize = 13.sp, color = TextSecondary)
+                                        Spacer(modifier = Modifier.weight(1f))
+                                        val currentSourceName = currentSources
+                                            .find { it.sourceId == selectedSource }?.sourceName
+                                            ?: currentSources.firstOrNull()?.sourceName
+                                            ?: "默认播放"
                                         Text(
-                                            if (showIntroduction) "收起" else "展开全部",
-                                            fontSize = 13.sp,
+                                            currentSourceName,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium,
                                             color = Primary
+                                        )
+                                        Icon(
+                                            Icons.Default.ArrowDropDown,
+                                            contentDescription = null,
+                                            tint = Primary,
+                                            modifier = Modifier.size(20.dp)
                                         )
                                     }
                                 }
                             }
                         }
 
-                        // Episode list grid (inline)
-                        if (episodes.isNotEmpty()) {
+                        // ===== Introduction card =====
+                        val intro = m?.introduction ?: ""
+                        if (intro.isNotEmpty()) {
                             item {
                                 Spacer(modifier = Modifier.height(8.dp))
-                                Text("选集", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                                Spacer(modifier = Modifier.height(8.dp))
-                            }
-                            val chunkedEps = episodes.take(99).chunked(5)
-                            items(chunkedEps.size) { rowIdx ->
-                                val rowEps = chunkedEps[rowIdx]
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                Surface(
+                                    color = CardBg,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    rowEps.forEach { ep ->
-                                        val selected = ep.episodeNumber == currentEpisode
-                                        Box(
-                                            modifier = Modifier
-                                                .weight(1f)
-                                                .heightIn(min = 40.dp)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(if (selected) Primary else TabBg)
-                                                .clickable {
-                                                    currentEpisode = ep.episodeNumber
-                                                },
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text(
-                                                "${ep.episodeNumber}",
-                                                fontSize = 14.sp,
-                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                                                color = if (selected) White else TextPrimary
+                                    Column(modifier = Modifier.padding(14.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                Icons.Default.Info,
+                                                contentDescription = null,
+                                                tint = Primary,
+                                                modifier = Modifier.size(16.dp)
                                             )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("简介", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                        }
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        val maxLines = if (showIntroduction) Int.MAX_VALUE else 4
+                                        Text(
+                                            decodeHtml(intro),
+                                            fontSize = 14.sp,
+                                            color = TextPrimary,
+                                            lineHeight = 22.sp,
+                                            maxLines = maxLines,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (intro.length > 100) {
+                                            TextButton(
+                                                onClick = { showIntroduction = !showIntroduction },
+                                                contentPadding = PaddingValues(0.dp)
+                                            ) {
+                                                Text(
+                                                    if (showIntroduction) "收起" else "展开全部",
+                                                    fontSize = 13.sp,
+                                                    color = Primary
+                                                )
+                                            }
                                         }
                                     }
-                                    val remaining = 5 - rowEps.size
-                                    if (remaining > 0) {
-                                        repeat(remaining) { Spacer(modifier = Modifier.weight(1f)) }
+                                }
+                            }
+                        }
+
+                        // ===== Episode list card (only after data loaded) =====
+                        if (detailLoaded && episodes.isNotEmpty()) {
+                            item {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Surface(
+                                    color = CardBg,
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(14.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                "选集",
+                                                fontSize = 16.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = TextPrimary
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                "共${episodes.size}集",
+                                                fontSize = 12.sp,
+                                                color = TextHint
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.height(12.dp))
+                                        val chunkedEps = episodes.take(99).chunked(5)
+                                        chunkedEps.forEach { rowEps ->
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                rowEps.forEach { ep ->
+                                                    val selected = ep.episodeNumber == currentEpisode
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .height(40.dp)
+                                                            .clip(RoundedCornerShape(8.dp))
+                                                            .background(if (selected) Primary else TabBg)
+                                                            .clickable {
+                                                                currentEpisode = ep.episodeNumber
+                                                            },
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Text(
+                                                            "${ep.episodeNumber}",
+                                                            fontSize = 14.sp,
+                                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                                            color = if (selected) White else TextPrimary
+                                                        )
+                                                    }
+                                                }
+                                                val remaining = 5 - rowEps.size
+                                                if (remaining > 0) {
+                                                    repeat(remaining) { Spacer(modifier = Modifier.weight(1f)) }
+                                                }
+                                            }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                        }
                                     }
                                 }
-                                Spacer(modifier = Modifier.height(8.dp))
                             }
                         }
 
@@ -632,11 +915,185 @@ fun PlayerScreen(
     // Speed selection dialog
     
 
+    // Batch download dialog (multiple episodes; DownloadManager runs them one by one)
+    if (showDownloadDialog) {
+        AlertDialog(
+            onDismissRequest = { showDownloadDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "批量下载",
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = {
+                        selectedDownloadEps = episodes.map { it.episodeNumber }.toSet()
+                    }) {
+                        Text("全选", color = Primary)
+                    }
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        "「${movie?.title ?: ""}」已选 ${selectedDownloadEps.size} 集（共${episodes.size}集）",
+                        fontSize = 13.sp,
+                        color = TextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(5),
+                        modifier = Modifier.heightIn(max = 260.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(episodes.take(150), key = { it.episodeNumber }) { ep ->
+                            val selected = ep.episodeNumber in selectedDownloadEps
+                            Box(
+                                modifier = Modifier
+                                    .height(38.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) Primary else TabBg)
+                                    .clickable {
+                                        selectedDownloadEps = if (selected) {
+                                            selectedDownloadEps - ep.episodeNumber
+                                        } else {
+                                            selectedDownloadEps + ep.episodeNumber
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    "${ep.episodeNumber}",
+                                    fontSize = 13.sp,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (selected) White else TextPrimary
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        "将逐个串行下载（并发 1），可随时在「我的下载」查看进度并离线观看。",
+                        fontSize = 12.sp,
+                        color = TextHint
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val sel = selectedDownloadEps.sorted()
+                    showDownloadDialog = false
+                    if (sel.isEmpty()) return@TextButton
+                    scope.launch {
+                        val urls = mutableListOf<Pair<Int, String>>()
+                        for (ep in sel) {
+                            val u = if (ep == currentEpisode) {
+                                playUrl
+                            } else {
+                                runCatching {
+                                    repository.getPlayUrl(movieId, ep, selectedSource).url
+                                }.getOrNull() ?: ""
+                            }
+                            urls.add(ep to u)
+                        }
+                        movie?.let { m -> repository.downloadMovies(m, urls) }
+                        toast("已加入下载队列（${urls.size} 集）")
+                    }
+                }) {
+                    Text("开始下载", color = Primary, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDownloadDialog = false }) {
+                    Text("取消", color = TextSecondary)
+                }
+            }
+        )
+    }
+
+    // Comment dialog (local, persisted)
+    if (showCommentDialog) {
+        val comments = remember(movieId, showCommentDialog) { repository.getComments(movieId) }
+        AlertDialog(
+            onDismissRequest = { showCommentDialog = false; commentInput = "" },
+            title = { Text("评论", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(modifier = Modifier.heightIn(max = 360.dp)) {
+                    LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        if (comments.isEmpty()) {
+                            item {
+                                Text("暂无评论，来写第一条吧", fontSize = 13.sp, color = TextHint,
+                                    modifier = Modifier.padding(vertical = 16.dp))
+                            }
+                        } else {
+                            items(comments, key = { it.time }) { c ->
+                                Text(c.text, fontSize = 14.sp, color = TextPrimary, modifier = Modifier.padding(vertical = 6.dp))
+                                Text(
+                                    java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+                                        .format(java.util.Date(c.time)),
+                                    fontSize = 10.sp, color = TextHint
+                                )
+                                HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = commentInput,
+                            onValueChange = { commentInput = it.take(200) },
+                            placeholder = { Text("说点什么...", fontSize = 13.sp) },
+                            modifier = Modifier.weight(1f).height(48.dp),
+                            textStyle = LocalTextStyle.current.copy(fontSize = 13.sp),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Primary, unfocusedBorderColor = Divider
+                            )
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        FilledIconButton(
+                            onClick = {
+                                if (commentInput.isNotBlank()) {
+                                    repository.addComment(movieId, commentInput.trim())
+                                    commentInput = ""
+                                }
+                            },
+                            modifier = Modifier.size(40.dp),
+                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = Primary)
+                        ) {
+                            Icon(Icons.Default.Send, contentDescription = "发送", tint = White, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showCommentDialog = false; commentInput = "" }) {
+                    Text("关闭", color = TextSecondary)
+                }
+            }
+        )
+    }
+
     // Source selection dialog
     if (showSourceDialog) {
+        val dialogSourceName = currentSources
+            .find { it.sourceId == selectedSource }?.sourceName
+            ?: "播放源"
         AlertDialog(
             onDismissRequest = { showSourceDialog = false },
-            title = { Text("选择播放源", fontWeight = FontWeight.Bold) },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("切换播放源", fontWeight = FontWeight.Bold)
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        "当前: $dialogSourceName",
+                        fontSize = 12.sp,
+                        color = Primary,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            },
             text = {
                 Column {
                     currentSources.forEach { src ->
@@ -677,6 +1134,7 @@ private fun PlayerSurface(
     isBuffering: Boolean,
     isLoading: Boolean,
     currentEpisode: Int,
+    isLandscape: Boolean,
     onTap: () -> Unit,
     onRetry: () -> Unit,
     isSwiping: Boolean,
@@ -684,6 +1142,8 @@ private fun PlayerSurface(
     onSwipeStart: () -> Unit,
     onSwipe: (Long) -> Unit,
     onSwipeEnd: () -> Unit,
+    showSourceSwitch: Boolean,
+    onSwitchSource: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(modifier = modifier) {
@@ -701,6 +1161,12 @@ private fun PlayerSurface(
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
                     }
+                },
+                update = { view ->
+                    // Always use FIT so the complete video is visible.
+                    // Portrait (9:16) videos show with side bars in landscape;
+                    // landscape (16:9) videos fill normally.
+                    view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 },
                 modifier = Modifier
                     .fillMaxSize()
@@ -740,12 +1206,33 @@ private fun PlayerSurface(
                 }
             }
         } else if (playerError != null) {
-            // Error state
+            // Error state — clean, minimalist design
             Box(modifier = Modifier.fillMaxSize().background(PlayerBg), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Default.Warning, contentDescription = null,
-                        tint = White.copy(alpha = 0.7f), modifier = Modifier.size(56.dp))
-                    Spacer(modifier = Modifier.height(12.dp))
+                    // Clean play icon with a subtle error accent
+                    Box(
+                        modifier = Modifier
+                            .size(80.dp)
+                            .clip(CircleShape)
+                            .background(White.copy(alpha = 0.07f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        // Play icon
+                        Icon(
+                            Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            tint = White.copy(alpha = 0.25f),
+                            modifier = Modifier.size(36.dp)
+                        )
+                        // Thin red slash across
+                        Box(
+                            modifier = Modifier
+                                .size(width = 36.dp, height = 2.dp)
+                                .rotate(45f)
+                                .background(HotRed.copy(alpha = 0.6f))
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(18.dp))
                     Text("视频加载失败", color = White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                     Spacer(modifier = Modifier.height(4.dp))
                     Text("第${currentEpisode}集", color = White.copy(alpha = 0.6f), fontSize = 12.sp)
@@ -754,11 +1241,27 @@ private fun PlayerSurface(
                     Spacer(modifier = Modifier.height(16.dp))
                     FilledTonalButton(
                         onClick = onRetry,
-                        colors = ButtonDefaults.filledTonalButtonColors(containerColor = White.copy(alpha = 0.15f), contentColor = White)
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = White.copy(alpha = 0.15f),
+                            contentColor = White
+                        )
                     ) {
                         Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("重新加载", fontSize = 13.sp)
+                    }
+                    // Show source-switch button when multiple sources exist
+                    if (showSourceSwitch) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { onRetry(); onSwitchSource() },
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = White.copy(alpha = 0.8f)),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, White.copy(alpha = 0.25f))
+                        ) {
+                            Icon(Icons.Default.SwapHoriz, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("切换播放源", fontSize = 12.sp)
+                        }
                     }
                 }
             }
@@ -1072,66 +1575,6 @@ private fun SeekBarWidget(
     }
 }
 
-// Compact episode selector panel
-@Composable
-private fun EpisodeSelectorPanel(
-    episodes: List<Episode>,
-    currentEpisode: Int,
-    onSelect: (Int) -> Unit,
-    onClose: () -> Unit
-) {
-    val displayEps = episodes.take(99)
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = 280.dp),
-        color = White,
-        shadowElevation = 4.dp
-    ) {
-        Column {
-            // Header
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("选集", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextPrimary,
-                    modifier = Modifier.weight(1f))
-                IconButton(onClick = onClose, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Default.Close, contentDescription = "关闭",
-                        tint = TextSecondary, modifier = Modifier.size(20.dp))
-                }
-            }
-            // Episode grid
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(5),
-                modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(displayEps, key = { it.episodeNumber }) { ep ->
-                    val selected = ep.episodeNumber == currentEpisode
-                    Box(
-                        modifier = Modifier
-                            .heightIn(min = 38.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (selected) Primary else TabBg)
-                            .clickable { onSelect(ep.episodeNumber) },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "${ep.episodeNumber}",
-                            fontSize = 13.sp,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                            color = if (selected) White else TextPrimary
-                        )
-                    }
-                }
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-    }
-}
-
 // Time formatting helpers
 private fun formatTimeCompact(ms: Long): String {
     if (ms <= 0L) return "0:00"
@@ -1159,31 +1602,60 @@ private fun formatTimeFull(ms: Long): String {
     }
 }
 
-// UI helper composables
+// Small rounded meta label (e.g. 剧情, 大陆)
 @Composable
-private fun PlayerAction(
+private fun MetaTag(text: String) {
+    Surface(
+        color = TabBg,
+        shape = RoundedCornerShape(4.dp)
+    ) {
+        Text(
+            text,
+            fontSize = 11.sp,
+            color = TextSecondary,
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+        )
+    }
+}
+
+// Circular icon action with label (favorite / comment / share)
+@Composable
+private fun RoundAction(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     tint: Color,
+    active: Boolean,
     onClick: () -> Unit
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .padding(horizontal = 18.dp, vertical = 6.dp)
     ) {
-        Icon(
-            icon,
-            contentDescription = label,
-            tint = tint,
-            modifier = Modifier.size(22.dp)
-        )
-        Spacer(modifier = Modifier.height(2.dp))
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(CircleShape)
+                .background(
+                    if (active) tint.copy(alpha = 0.15f)
+                    else PrimaryLight.copy(alpha = 0.10f)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                icon,
+                contentDescription = label,
+                tint = if (active) tint else TextSecondary,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
         Text(
             label,
-            fontSize = 10.sp,
-            color = tint,
+            fontSize = 11.sp,
+            color = if (active) tint else TextSecondary,
             maxLines = 1,
             softWrap = false
         )

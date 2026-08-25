@@ -35,6 +35,7 @@ fun SearchResultScreen(
     keyword: String,
     repository: MovieRepository,
     onBack: () -> Unit,
+    onSearchClick: () -> Unit = {},
     onMovieClick: (String) -> Unit
 ) {
     var movies by remember { mutableStateOf(listOf<Movie>()) }
@@ -86,7 +87,7 @@ fun SearchResultScreen(
                     .height(36.dp)
                     .clip(RoundedCornerShape(18.dp))
                     .background(White.copy(alpha = 0.2f))
-                    .clickable { },
+                    .clickable { onSearchClick() },
                 contentAlignment = Alignment.CenterStart
             ) {
                 Row(

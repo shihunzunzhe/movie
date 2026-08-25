@@ -1,4 +1,4 @@
-#Thu Aug 20 16:37:47 CST 2026
+#Tue Aug 25 11:01:52 CST 2026
 base.0=/Users/neil/soft/code/Android-app/movie/EarthVideoAndroid/app/build/intermediates/dex/debug/mergeExtDexDebug/classes.dex
 base.1=/Users/neil/soft/code/Android-app/movie/EarthVideoAndroid/app/build/intermediates/dex/debug/mergeProjectDexDebug/0/classes.dex
 base.10=/Users/neil/soft/code/Android-app/movie/EarthVideoAndroid/app/build/intermediates/dex/debug/mergeProjectDexDebug/5/classes.dex

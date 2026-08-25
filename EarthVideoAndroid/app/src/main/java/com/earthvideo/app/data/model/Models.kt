@@ -36,7 +36,8 @@ data class Movie(
     val tags: String = "",
     val source: String = "",
     val sourceAvatar: String = "",
-    val introduction: String = ""
+    val introduction: String = "",
+    val publishDate: String? = null
 )
 
 data class Episode(
@@ -57,7 +58,8 @@ data class PlayUrlResponse(
     val movieId: String,
     val episode: Int,
     val url: String,
-    val sources: List<PlaySource>
+    val sources: List<PlaySource>,
+    val actualSource: String? = null
 )
 
 data class PlaySource(

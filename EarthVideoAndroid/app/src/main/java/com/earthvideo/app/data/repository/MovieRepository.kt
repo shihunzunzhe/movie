@@ -2,11 +2,18 @@ package com.earthvideo.app.data.repository
 
 import android.content.Context
 import com.earthvideo.app.data.api.RetrofitClient
+import com.earthvideo.app.data.download.DownloadManager
+import com.earthvideo.app.data.download.DownloadTask
 import com.earthvideo.app.data.model.*
+import kotlinx.coroutines.flow.StateFlow
 
 class MovieRepository(context: Context) {
     private val api = RetrofitClient.apiService
     private val local = LocalStorage(context)
+
+    init {
+        DownloadManager.init(context)
+    }
 
     suspend fun getHomeRecommend(category: String = "recommend", page: Int = 1, size: Int = 20): PageData<Movie> {
         return api.getHomeRecommend(category, page, size).data
@@ -51,8 +58,13 @@ class MovieRepository(context: Context) {
         return api.getMovieEpisodes(id).data
     }
 
-    suspend fun getPlayUrl(id: String, episode: Int = 1): PlayUrlResponse {
-        return api.getPlayUrl(id, episode).data
+    suspend fun getPlayUrl(
+        id: String,
+        episode: Int = 1,
+        source: String = "default",
+        force: Int = 0
+    ): PlayUrlResponse {
+        return api.getPlayUrl(id, episode, source, force).data
     }
 
     suspend fun getUserProfile(): UserProfile {
@@ -77,13 +89,50 @@ class MovieRepository(context: Context) {
 
     fun getLocalFavoriteCount(): Int = local.getFavoriteCount()
 
-    // Health
-    suspend fun healthCheck(): Boolean {
-        return try {
-            val result = api.healthCheck()
-            result["status"] == "ok"
-        } catch (e: Exception) {
-            false
-        }
-    }
+    // ------------------------------------------------------------------
+    // User
+    // ------------------------------------------------------------------
+    fun getNickname(): String = local.getNickname()
+    fun setNickname(name: String) = local.setNickname(name)
+    fun isLoggedIn(): Boolean = local.isLoggedIn()
+    fun logout() = local.logout()
+
+    // ------------------------------------------------------------------
+    // Settings
+    // ------------------------------------------------------------------
+    fun isWifiOnly(): Boolean = local.isWifiOnly()
+    fun setWifiOnly(v: Boolean) = local.setWifiOnly(v)
+    fun isKeepScreenOn(): Boolean = local.isKeepScreenOn()
+    fun setKeepScreenOn(v: Boolean) = local.setKeepScreenOn(v)
+
+    // ------------------------------------------------------------------
+    // Comments
+    // ------------------------------------------------------------------
+    fun getComments(movieId: String) = local.getComments(movieId)
+    fun addComment(movieId: String, text: String) = local.addComment(movieId, text)
+
+    // ------------------------------------------------------------------
+    // Downloads (offline HLS)
+    // ------------------------------------------------------------------
+
+    val downloadTasks: StateFlow<List<DownloadTask>> get() = DownloadManager.tasks
+
+    fun downloadMovie(movie: Movie, episode: Int, url: String) =
+        DownloadManager.enqueue(movie, episode, url)
+
+    /** Batch download several episodes; DownloadManager processes them serially (concurrency=1). */
+    fun downloadMovies(movie: Movie, episodes: List<Pair<Int, String>>) =
+        DownloadManager.enqueueBatch(movie, episodes)
+
+    fun cancelDownload(dirName: String) = DownloadManager.cancel(dirName)
+
+    fun deleteDownload(dirName: String) = DownloadManager.delete(dirName)
+
+    fun clearDownloads() = DownloadManager.clearAll()
+
+    fun localIndexPath(dirName: String): String? = DownloadManager.localIndexPath(dirName)
+
+    fun localMovie(dirName: String): Movie? = DownloadManager.movieForDir(dirName)
+
+    fun localEpisode(dirName: String): Int = DownloadManager.episodeForDir(dirName)
 }

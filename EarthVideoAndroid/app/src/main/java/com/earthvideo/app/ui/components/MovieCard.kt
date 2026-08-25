@@ -21,6 +21,7 @@ import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import com.earthvideo.app.data.model.Movie
 import com.earthvideo.app.ui.theme.*
+import com.earthvideo.app.ui.components.decodeHtml
 
 @Composable
 fun MovieCard(movie: Movie, onClick: () -> Unit, modifier: Modifier = Modifier) {
@@ -97,6 +98,26 @@ fun MovieCard(movie: Movie, onClick: () -> Unit, modifier: Modifier = Modifier) 
                         )
                     )
             )
+            // Source badge (top-left)
+            if (movie.source.isNotEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(4.dp)
+                        .background(
+                            color = SourceBadgeBg,
+                            shape = RoundedCornerShape(4.dp)
+                        )
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        decodeHtml(movie.source),
+                        fontSize = 10.sp,
+                        color = White,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
             // Hot tag
             if (movie.hotTag) {
                 Box(
@@ -127,7 +148,7 @@ fun MovieCard(movie: Movie, onClick: () -> Unit, modifier: Modifier = Modifier) 
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        movie.episodeTag,
+                        decodeHtml(movie.episodeTag),
                         fontSize = 10.sp,
                         color = White,
                         fontWeight = FontWeight.Medium
@@ -160,18 +181,30 @@ fun MovieCard(movie: Movie, onClick: () -> Unit, modifier: Modifier = Modifier) 
             }
         }
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
-            Text(
-                text = movie.title,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                color = TextPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = movie.title,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                val date = movie.publishDate?.takeLast(5) // "MM-DD"
+                if (date != null) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = date,
+                        fontSize = 10.sp,
+                        color = TextHint
+                    )
+                }
+            }
             if (movie.description.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = movie.description,
+                    text = decodeHtml(movie.description),
                     fontSize = 12.sp,
                     color = TextHint,
                     maxLines = 1,

@@ -1,4 +1,7 @@
 package com.earthvideo.app.ui.navigation
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.remember
 
 import androidx.compose.runtime.Composable
@@ -30,6 +33,7 @@ object Routes {
     const val DISCOVER = "discover"
     const val RANK = "rank"
     const val PLAYER = "player/{movieId}/{episode}"
+    const val PLAYER_LOCAL = "player_local/{dirName}"
     const val HISTORY = "history"
     const val FAVORITES = "favorites"
     const val DOWNLOADS = "downloads"
@@ -37,6 +41,7 @@ object Routes {
 
     fun searchResult(keyword: String) = "search_result/$keyword"
     fun player(movieId: String, episode: Int = 1) = "player/$movieId/$episode"
+    fun playerLocal(dirName: String) = "player_local/$dirName"
 }
 
 @Composable
@@ -44,7 +49,17 @@ fun AppNavGraph(navController: NavHostController, modifier: Modifier = Modifier)
     val context = LocalContext.current
     val repository = remember { MovieRepository(context) }
 
-    NavHost(navController = navController, startDestination = Routes.HOME, modifier = modifier) {
+    NavHost(
+        navController = navController,
+        startDestination = Routes.HOME,
+        modifier = modifier,
+        // Quick, light transitions: avoids the heavy default cross-fade that made
+        // exiting the fullscreen player feel janky.
+        enterTransition = { fadeIn(animationSpec = tween(220)) },
+        exitTransition = { fadeOut(animationSpec = tween(180)) },
+        popEnterTransition = { fadeIn(animationSpec = tween(220)) },
+        popExitTransition = { fadeOut(animationSpec = tween(180)) }
+    ) {
         composable(Routes.HOME) {
             HomeScreen(
                 repository = repository,
@@ -72,6 +87,7 @@ fun AppNavGraph(navController: NavHostController, modifier: Modifier = Modifier)
                 keyword = keyword,
                 repository = repository,
                 onBack = { navController.popBackStack() },
+                onSearchClick = { navController.popBackStack() },
                 onMovieClick = { movieId -> navController.navigate(Routes.player(movieId)) }
             )
         }
@@ -88,7 +104,8 @@ fun AppNavGraph(navController: NavHostController, modifier: Modifier = Modifier)
             DiscoverScreen(
                 repository = repository,
                 onMovieClick = { movieId -> navController.navigate(Routes.player(movieId)) },
-                onSearchClick = { navController.navigate(Routes.SEARCH) }
+                onSearchClick = { navController.navigate(Routes.SEARCH) },
+                onTopicSearch = { keyword -> navController.navigate(Routes.searchResult(keyword)) }
             )
         }
         composable(Routes.RANK) {
@@ -113,6 +130,19 @@ fun AppNavGraph(navController: NavHostController, modifier: Modifier = Modifier)
                 onBack = { navController.popBackStack() }
             )
         }
+        composable(
+            route = Routes.PLAYER_LOCAL,
+            arguments = listOf(navArgument("dirName") { type = NavType.StringType })
+        ) { backStackEntry ->
+            val dirName = backStackEntry.arguments?.getString("dirName") ?: ""
+            PlayerScreen(
+                movieId = "",
+                initialEpisode = 1,
+                repository = repository,
+                onBack = { navController.popBackStack() },
+                localDir = dirName
+            )
+        }
         composable(Routes.HISTORY) {
             HistoryScreen(
                 repository = repository,
@@ -129,11 +159,14 @@ fun AppNavGraph(navController: NavHostController, modifier: Modifier = Modifier)
         }
         composable(Routes.DOWNLOADS) {
             DownloadsScreen(
-                onBack = { navController.popBackStack() }
+                repository = repository,
+                onBack = { navController.popBackStack() },
+                onMovieClick = { dirName -> navController.navigate(Routes.playerLocal(dirName)) }
             )
         }
         composable(Routes.SETTINGS) {
             SettingsScreen(
+                repository = repository,
                 onBack = { navController.popBackStack() }
             )
         }
