@@ -19,13 +19,14 @@ logger = logging.getLogger("earthvideo.scraper")
 
 from src.data_sources import DataSourceManager
 from src.mysql_store import MySQLStore
+from src.config import config
 
 
 async def run_scrape():
     logger.info("=" * 50)
     logger.info("Starting scrape cycle (subprocess)…")
 
-    mgr = DataSourceManager()
+    mgr = DataSourceManager(proxy_url=config.proxy_url)
     mgr.add_source("yutu", "https://yutuzy10.com", enabled=True)
     mgr.add_source("mogu", "https://www.5o5k.com", enabled=True)
 

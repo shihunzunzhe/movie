@@ -51,6 +51,11 @@ class AppConfig:
     db_password: str = ""
     db_name: str = "earthvideo"
 
+    # ── Proxy ─────────────────────────────────────────────────────────
+    proxy_url: str = ""
+    """HTTP proxy for scraping Chinese websites (e.g. http://127.0.0.1:7897).
+    Leave empty for direct connection (local / mainland China server)."""
+
     def __init__(self) -> None:
         self.reload()
 
@@ -74,6 +79,9 @@ class AppConfig:
         self.db_user = os.getenv("DB_USER", "root")
         self.db_password = os.getenv("DB_PASSWORD", "")
         self.db_name = os.getenv("DB_NAME", "earthvideo")
+
+        # ── Proxy ──
+        self.proxy_url = os.getenv("PROXY_URL", "").strip()
 
         logger.info(
             "Config loaded: collection_enabled=%s, scrape_interval=%s, sync_interval=%s",
@@ -103,6 +111,7 @@ class AppConfig:
             "db_host": self.db_host,
             "db_port": self.db_port,
             "db_name": self.db_name,
+            "proxy_url": self.proxy_url,
         }
 
 

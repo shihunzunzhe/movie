@@ -95,8 +95,9 @@ def _is_truthy_field(v) -> bool:
 class YutuHtmlSource:
     SOURCE_NAME = "\u7389\u5154\u6e90"
 
-    def __init__(self, base_url: str = "https://yutuzy10.com"):
+    def __init__(self, base_url: str = "https://yutuzy10.com", proxy_url: str = ""):
         self.base_url = base_url.rstrip("/")
+        self.proxy_url = proxy_url.strip()
         self._movies: Dict[str, Movie] = {}
         self._last_fetch: float = 0
         self._fetch_interval: float = 300
@@ -113,6 +114,13 @@ class YutuHtmlSource:
             ),
         }
 
+    @property
+    def _proxy_kwargs(self) -> dict:
+        """Return httpx proxy kwargs when proxy_url is configured."""
+        if self.proxy_url:
+            return {"proxies": self.proxy_url}
+        return {}
+
     async def fetch_movies(self, force: bool = False) -> List[Movie]:
         now = time.time()
         if not force and self._movies and (now - self._last_fetch) < self._fetch_interval:
@@ -122,6 +130,7 @@ class YutuHtmlSource:
         async with httpx.AsyncClient(
             timeout=30.0,
             limits=httpx.Limits(max_keepalive_connections=2),
+            **self._proxy_kwargs,
         ) as client:
             for cid in CATEGORY_IDS:
                 for page in range(1, MAX_PAGES + 1):
@@ -270,7 +279,7 @@ class YutuHtmlSource:
         url = f"{self.base_url}/index.php/vod/detail/id/{vid}.html"
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, **self._proxy_kwargs) as client:
                 resp = await client.get(
                     url,
                     headers={**self._headers, "referer": f"{self.base_url}/"},
@@ -458,8 +467,9 @@ class MoguHtmlSource:
     MAX_PAGES = 2
     EPISODES_TO_PRELOAD = 0
 
-    def __init__(self, base_url: str = "https://www.5o5k.com"):
+    def __init__(self, base_url: str = "https://www.5o5k.com", proxy_url: str = ""):
         self.base_url = base_url.rstrip("/")
+        self.proxy_url = proxy_url.strip()
         self.name = self.SOURCE_NAME
         self._movies: Dict[str, Movie] = {}
         self._last_fetch: float = 0
@@ -478,6 +488,13 @@ class MoguHtmlSource:
             "accept-language": "zh-CN,zh;q=0.9",
             "referer": self.base_url + "/",
         }
+
+    @property
+    def _proxy_kwargs(self) -> dict:
+        """Return httpx proxy kwargs when proxy_url is configured."""
+        if self.proxy_url:
+            return {"proxies": self.proxy_url}
+        return {}
 
     @staticmethod
     def source_prefix() -> str:
@@ -500,6 +517,7 @@ class MoguHtmlSource:
         async with httpx.AsyncClient(
             timeout=30.0,
             limits=httpx.Limits(max_keepalive_connections=2),
+            **self._proxy_kwargs,
         ) as client:
             for cid in self.CATEGORY_IDS:
                 for page in range(1, self.MAX_PAGES + 1):
@@ -599,6 +617,7 @@ class MoguHtmlSource:
             async with httpx.AsyncClient(
                 timeout=30.0,
                 limits=httpx.Limits(max_keepalive_connections=2),
+                **self._proxy_kwargs,
             ) as client:
                 resp = await client.get(
                     url,
@@ -946,6 +965,7 @@ class MoguHtmlSource:
             async with httpx.AsyncClient(
                 timeout=30.0,
                 limits=httpx.Limits(max_keepalive_connections=2),
+                **self._proxy_kwargs,
             ) as client:
                 resp = await client.get(
                     url,
@@ -993,6 +1013,7 @@ class MoguHtmlSource:
         async with httpx.AsyncClient(
             timeout=30.0,
             limits=httpx.Limits(max_keepalive_connections=2),
+            **self._proxy_kwargs,
         ) as client:
             url = await self._fetch_play_url(client, vid, sid, episode)
 
@@ -1008,7 +1029,8 @@ class MoguHtmlSource:
 
 
 class DataSourceManager:
-    def __init__(self):
+    def __init__(self, proxy_url: str = ""):
+        self.proxy_url = proxy_url.strip()
         self.sources: List = []
         self._by_prefix: Dict[str, object] = {}
         self._by_name: Dict[str, object] = {}
@@ -1017,9 +1039,9 @@ class DataSourceManager:
     def add_source(self, name: str, base_url: str, enabled: bool = True):
         kind = (name or "").lower()
         if kind in ("mogu", "5o5k"):
-            src = MoguHtmlSource(base_url)
+            src = MoguHtmlSource(base_url, proxy_url=self.proxy_url)
         else:
-            src = YutuHtmlSource(base_url)
+            src = YutuHtmlSource(base_url, proxy_url=self.proxy_url)
         self.sources.append(src)
         prefix = getattr(src, "SOURCE_PREFIX", None)
         if prefix:

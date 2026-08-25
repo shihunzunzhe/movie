@@ -51,7 +51,7 @@ from src.mysql_store import MySQLStore
 from src.config import config
 from src.hls_proxy import cdn_headers, rewrite_hls_playlist
 
-data_manager = DataSourceManager()
+data_manager = DataSourceManager(proxy_url=config.proxy_url)
 data_manager.add_source("yutu", "https://yutuzy10.com", enabled=True)
 data_manager.add_source("mogu", "https://www.5o5k.com", enabled=True)
 mysql = MySQLStore()
