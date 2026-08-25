@@ -111,6 +111,8 @@ fun PlayerScreen(
     var swipeStartPosition by remember { mutableLongStateOf(0L) }
     // Data loaded flag for detail page
     var detailLoaded by remember { mutableStateOf(false) }
+    // Track fullscreen state separately (portrait videos stay portrait)
+    var isFullscreen by remember { mutableStateOf(false) }
     // Actual video aspect ratio (width / height), updated from player
     
     val DEFAULT_ASPECT = 16f / 9f
@@ -130,14 +132,23 @@ fun PlayerScreen(
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val baseUrl = remember { RetrofitClient.getBaseUrl() }
 
-    // Toggle fullscreen — force landscape for typical fullscreen experience.
-    // Portrait videos use RESIZE_MODE_FIT so they show completely (with side bars).
+    // Toggle fullscreen — landscape for wide videos (aspect >= 1), stay portrait
+    // for portrait videos so the user can see the full frame clearly.
+    // Portrait videos use RESIZE_MODE_FIT and show completely (with side bars).
+    val isPortraitVideo = videoAspect < 1.0f
     fun toggleFullscreen(full: Boolean) {
+        isFullscreen = full
         try {
             val activity = context as? android.app.Activity
             if (activity != null) {
                 if (full) {
-                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    activity.requestedOrientation = if (isPortraitVideo) {
+                        // Portrait video: stay portrait, expand to fill width
+                        ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                    } else {
+                        // Landscape video: rotate to landscape
+                        ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                    }
                 } else {
                     activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 }
@@ -145,8 +156,9 @@ fun PlayerScreen(
         } catch (_: Exception) {}
     }
 
-    LaunchedEffect(isLandscape) {
-        if (isLandscape) {
+    LaunchedEffect(isLandscape, isFullscreen) {
+        val immersive = isLandscape || isFullscreen
+        if (immersive) {
             try {
                 val activity = context as? android.app.Activity
                 activity?.window?.decorView?.systemUiVisibility = (
@@ -199,11 +211,37 @@ fun PlayerScreen(
                         durationMs = duration.coerceAtLeast(0L)
                         detailLoaded = true
                     }
-                    // Episode finished: free its disk cache for the next one.
-                    if (playbackState == Player.STATE_ENDED && prefetchedKeys.isNotEmpty()) {
-                        PlaybackPrefetch.releaseSegments(context, prefetchedKeys)
-                        prefetchedKeys = emptyList()
-                        prefetchProgress = -1
+                    // Episode finished: auto-play next episode if available.
+                    if (playbackState == Player.STATE_ENDED) {
+                        if (currentEpisode < episodes.size) {
+                            val nextEp = currentEpisode + 1
+                            scope.launch {
+                                controlsVisible = true
+                                // Show a brief toast notification
+                                toast("即将播放第${nextEp}集")
+                                // Small delay so user sees the toast
+                                kotlinx.coroutines.delay(600)
+                                currentEpisode = nextEp
+                            }
+                        } else {
+                            // All episodes done — show completion state briefly.
+                            scope.launch {
+                                controlsVisible = true
+                                toast("全部播放完成")
+                            }
+                            // Release disk cache.
+                            if (prefetchedKeys.isNotEmpty()) {
+                                PlaybackPrefetch.releaseSegments(context, prefetchedKeys)
+                                prefetchedKeys = emptyList()
+                                prefetchProgress = -1
+                            }
+                        }
+                    }
+                    // Clean up disk cache when switching episodes
+                    if (playbackState == Player.STATE_READY) {
+                        if (prefetchedKeys.isNotEmpty()) {
+                            // Keep prefetch from the new episode LaunchedEffect
+                        }
                     }
                 }
                 override fun onIsPlayingChanged(playing: Boolean) {
@@ -451,8 +489,8 @@ fun PlayerScreen(
         context.startActivity(android.content.Intent.createChooser(intent, "分享到"))
     }
 
-    BackHandler(enabled = isLandscape) {
-        if (isLandscape) {
+    BackHandler(enabled = isLandscape || isFullscreen) {
+        if (isLandscape || isFullscreen) {
             toggleFullscreen(false)
         } else {
             onBack()
@@ -465,15 +503,21 @@ fun PlayerScreen(
             .background(if (isLandscape) PlayerBg else PageBg)
     ) {
         // ============ Player section ============
-        // Portrait: the area matches the video's real aspect ratio (16:9, 4:3, 9:16...),
-        // clamped to sane bounds so extreme ratios do not swallow the whole screen.
+        // Portrait: fixed 16:9 container height (same for landscape & portrait videos).
+        // Portrait videos (9:16) show letterboxed (side bars) via RESIZE_MODE_FIT,
+        // so the info section below is always visible and the player never swallows
+        // the entire screen.
+        // Portrait fullscreen: expand to fill available height (video still letterboxed).
         // Landscape (fullscreen): cover the entire screen area.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .then(
-                    if (isLandscape) Modifier.fillMaxSize()
-                    else Modifier.aspectRatio(videoAspect.coerceIn(0.4f, 2.4f))
+                    when {
+                        isLandscape -> Modifier.fillMaxSize()
+                        isFullscreen -> Modifier.fillMaxHeight() // portrait fullscreen
+                        else -> Modifier.aspectRatio(16f / 9f)
+                    }
                 )
                 .background(PlayerBg)
         ) {
@@ -590,8 +634,8 @@ fun PlayerScreen(
                         },
                         onSeekStart = { userInteracting = true },
                         onSeekEnd = { userInteracting = false },
-                        onFullscreen = { toggleFullscreen(!isLandscape) },
-                        isFullscreen = isLandscape
+                        onFullscreen = { toggleFullscreen(!isFullscreen) },
+                        isFullscreen = isFullscreen
                     )
                 }
             }
