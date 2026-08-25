@@ -562,6 +562,7 @@ class MoguHtmlSource:
 
     def _parse_category_page(self, html: str, cid: int) -> List[Movie]:
         """Parse a vodshow list page and return Movie objects with basic info."""
+        from html import unescape as _unescape
         pattern = (
             r'<a[^>]*href="/voddetail/(\d+)\.html"'
             r'[^>]*title="([^"]*)"'
@@ -575,13 +576,13 @@ class MoguHtmlSource:
         category_name = self.CATEGORY_MAP.get(cid, f"\u5206\u7c7b{cid}")
         result: List[Movie] = []
         for vid, raw_title, block in blocks:
-            title = html.unescape(raw_title).strip()
+            title = _unescape(raw_title).strip()
             if not title:
                 continue
             poster_match = re.search(r'data-original="([^"]*)"', block)
             poster = poster_match.group(1).strip() if poster_match else ""
             note_match = re.search(r'<div class="module-item-note">([^<]*)</div>', block)
-            note = html.unescape(note_match.group(1).strip()) if note_match else ""
+            note = _unescape(note_match.group(1).strip()) if note_match else ""
 
             mid = self.make_movie_id(vid)
             result.append(Movie(
@@ -787,12 +788,7 @@ class MoguHtmlSource:
 
         self._movie_sources[mid] = sources
 
-        def _unescape(s: str) -> str:
-            try:
-                return html.unescape(s)
-            except AttributeError:
-                from html import unescape as _u
-                return _u(s)
+        from html import unescape as _unescape
 
         title = _unescape(title)
         introduction = _unescape(introduction)
