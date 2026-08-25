@@ -193,6 +193,9 @@ fun PlayerScreen(
                     .setAllowCrossProtocolRedirects(true)
             )
     }
+    fun toast(msg: String) {
+        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+    }
     val player = remember {
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(60000, 250000, 10000, 30000)
@@ -473,10 +476,6 @@ fun PlayerScreen(
                 }
             } catch (_: Exception) {}
         }
-    }
-
-    fun toast(msg: String) {
-        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
     }
 
     fun shareMovie() {
